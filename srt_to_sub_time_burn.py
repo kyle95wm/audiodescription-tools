@@ -15,18 +15,21 @@ def get_frame_rate(video_file):
     num, denom = map(int, rate.split('/'))
     return num / denom
 
-def burn_subtitles_with_background_and_timecode(video_file, srt_file=None, font_size=None, smpte_only=False):
-    """Burn subtitles and SMPTE timecode into the video."""
+def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, subs_only=False):
+    """Burn subtitles and/or SMPTE timecode into the video."""
     if not os.path.isfile(video_file):
         print(f"Error: The video file '{video_file}' does not exist.")
         return
 
     frame_rate = get_frame_rate(video_file)
     video_dir, video_name = os.path.split(video_file)
-    output_prefix = "tc_" if smpte_only else "burn_"
+    output_prefix = "tc_" if smpte_only else "subs_" if subs_only else "burn_"
     output_file = os.path.join(video_dir, f"{output_prefix}{video_name}")
 
-    filters = [f"drawtext=fontfile=/Library/Fonts/DroidSansMono.ttf:timecode='00\\:00\\:00\\:00':rate={frame_rate}:fontsize=30:fontcolor=white:x=10:y=10:box=1:boxcolor=0x000000AA"]
+    filters = []
+
+    if not subs_only:
+        filters.append(f"drawtext=fontfile=/Library/Fonts/DroidSansMono.ttf:timecode='00\\:00\\:00\\:00':rate={frame_rate}:fontsize=30:fontcolor=white:x=10:y=10:box=1:boxcolor=0x000000AA")
 
     if not smpte_only:
         if not os.path.isfile(srt_file):
@@ -55,17 +58,20 @@ def burn_subtitles_with_background_and_timecode(video_file, srt_file=None, font_
         print(e.output)
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2 or (len(sys.argv) < 3 and '--smpte-only' not in sys.argv):
-        print("Usage: python burn_subtitles_with_background_and_timecode.py <video_file> [<srt_file> [font_size]] [--smpte-only]")
+    if len(sys.argv) < 2 or (len(sys.argv) < 3 and '--smpte-only' not in sys.argv and '--subs-only' not in sys.argv):
+        print("Usage: python burn_subtitles.py <video_file> [<srt_file> [font_size]] [--smpte-only | --subs-only]")
+    elif '--smpte-only' in sys.argv and '--subs-only' in sys.argv:
+        print("Error: Cannot use both '--smpte-only' and '--subs-only' at the same time.")
     else:
         video_file = sys.argv[1]
-        if '--smpte-only' in sys.argv:
-            smpte_only = True
+        smpte_only = '--smpte-only' in sys.argv
+        subs_only = '--subs-only' in sys.argv
+
+        if smpte_only or subs_only:
             srt_file = None
             font_size = None
         else:
-            smpte_only = False
             srt_file = sys.argv[2]
             font_size = int(sys.argv[3]) if len(sys.argv) >= 4 else None
         
-        burn_subtitles_with_background_and_timecode(video_file, srt_file, font_size, smpte_only)
+        burn_subtitles(video_file, srt_file, font_size, smpte_only, subs_only)
