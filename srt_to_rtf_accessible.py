@@ -44,9 +44,10 @@ def convert_srt_to_accessible_formats(input_file, plain_text=False):
             seconds = math.ceil(duration.total_seconds())
 
             # Write to RTF
-            rtf.write(f"Line {idx}: {content}\\line\n")
-            rtf.write(f"Duration: {seconds} seconds\\line\n")
-            rtf.write("\\line\n")  # Extra space between lines
+            rtf.write(f"Line {idx}: \\par\n")
+            rtf.write(f"{content}\\par\n")
+            rtf.write(f"Duration: {seconds} seconds\\par\n")
+            rtf.write("\\par\n")  # Add spacing between entries
 
         rtf.write("}")
 
@@ -72,9 +73,9 @@ def convert_srt_to_accessible_formats(input_file, plain_text=False):
                 seconds = math.ceil(duration.total_seconds())
 
                 # Write to plain text
-                txt.write(f"Line {idx}: {content}\n")
-                txt.write(f"Duration: {seconds} seconds\n")
-                txt.write("\n")  # Extra space between entries
+                txt.write(f"Line {idx}:\n")
+                txt.write(f"{content}\n")
+                txt.write(f"Duration: {seconds} seconds\n\n")  # Add an extra line for spacing
 
         print(f"Plain text script saved to {output_txt}")
 
