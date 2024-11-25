@@ -55,7 +55,8 @@ def convert_srt_to_accessible_formats(input_file, plain_text=False):
 
     # Write plain text output if needed
     if plain_text:
-        with open(output_txt, 'w', encoding='utf-8') as txt:
+        # Ensure CRLF line endings by setting `newline='\r\n'`
+        with open(output_txt, 'w', encoding='utf-8', newline='\r\n') as txt:
             for idx, subtitle in enumerate(subtitles, start=1):
                 content = subtitle.content
                 start = subtitle.start
