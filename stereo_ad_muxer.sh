@@ -1,102 +1,65 @@
 #!/bin/bash
 
-# Script to mux a stereo AD track into a video file, optionally encode to E-AC3, and handle default audio track settings.
+# Script to encode a stereo AD track to E-AC3, mux it with a video file, and set it as default.
 
-# Function to auto-detect files based on common patterns
-auto_detect_files() {
-    local video_exts=("mp4" "mkv" "avi")
-    local stereo_suffix="_Stereo.wav"
-
-    for ext in "${video_exts[@]}"; do
-        video_file=$(ls *.$ext 2> /dev/null | head -n 1)
-        if [[ -n "$video_file" ]]; then
-            break
-        fi
-    done
-
-    stereo_audio_file=$(ls *$stereo_suffix 2> /dev/null | head -n 1)
-}
-
-# Check if the minimum number of arguments is provided
-if [ "$#" -eq 0 ]; then
-    echo "No arguments provided. Auto-detecting files..."
-    auto_detect_files
-    if [[ -z "$video_file" || -z "$stereo_audio_file" ]]; then
-        echo "Could not auto-detect all required files. Exiting."
-        exit 1
-    fi
-elif [ "$#" -lt 2 ]; then
-    echo "Usage: $0 <input_video> <stereo_ad_audio>"
+# Check for required inputs
+if [ "$#" -lt 2 ]; then
+    echo "Usage: $0 <input_video> <stereo_ad_audio> [output_video]"
     exit 1
+fi
+
+# Input files
+video_file="$1"
+stereo_audio_file="$2"
+eac3_audio_file="${stereo_audio_file%.*}_eac3.eac3"
+
+# Output file
+if [ -z "$3" ]; then
+    output_video="${video_file%.*}_with_AD.mp4"
 else
-    video_file="$1"
-    stereo_audio_file="$2"
+    output_video="$3"
 fi
 
-# Ask if the user wants to encode the stereo track to E-AC3
-echo "Do you want to encode the stereo AD track to E-AC3? (y/n, default: y)"
-read encode_to_eac3
-encode_to_eac3=${encode_to_eac3:-y}
-
-# If encoding to E-AC3, ask for dialogue normalization level
-if [[ "$encode_to_eac3" == "y" || "$encode_to_eac3" == "Y" ]]; then
-    echo "Enter the dialogue normalization level for E-AC3:"
-    echo " - Recommended value: -24 (standard for broadcast and streaming)"
-    echo " - Format: A whole number between -1 and -31 (default: -24)"
-    echo " - Example: Enter -24 for typical use or -27 for slightly quieter dialogue."
-    read dialnorm_value
-
-    # Validate input or use default if invalid
-    if [[ ! "$dialnorm_value" =~ ^-([1-9]|[12][0-9]|3[01])$ ]]; then
-        echo "Invalid input. Using default value of -24."
-        dialnorm_value="-24"
-    fi
-
-    # Encode stereo track to E-AC3
-    eac3_audio_file="${stereo_audio_file%.*}_eac3.wav"
-    echo "Encoding stereo track to E-AC3 with dialnorm: $dialnorm_value"
-    ffmpeg -i "$stereo_audio_file" \
-        -c:a eac3 -b:a 224k -dialnorm "$dialnorm_value" \
-        "$eac3_audio_file"
-    stereo_audio_file="$eac3_audio_file"
+# Check if input files exist
+if [ ! -f "$video_file" ]; then
+    echo "Error: Video file '$video_file' not found."
+    exit 1
 fi
 
-# Ask if the user wants to remove the original audio
-echo "Do you want to remove the original audio from the video? (y/n, default: y)"
-read remove_audio_answer
-remove_audio_answer=${remove_audio_answer:-y}
-remove_original_audio=0
-if [[ "$remove_audio_answer" == "y" || "$remove_audio_answer" == "Y" ]]; then
-    remove_original_audio=1
+if [ ! -f "$stereo_audio_file" ]; then
+    echo "Error: Stereo AD audio file '$stereo_audio_file' not found."
+    exit 1
+fi
+
+# Encode the stereo track to E-AC3
+echo "Encoding stereo track to E-AC3..."
+ffmpeg -i "$stereo_audio_file" -c:a eac3 -b:a 224k -dialnorm -24 "$eac3_audio_file"
+if [[ -f "$eac3_audio_file" ]]; then
+    echo "E-AC3 encoding successful: $eac3_audio_file"
 else
-    # Ask if the AD track should be the default track
-    echo "Do you want to make the AD track the default audio track? (y/n, default: n)"
-    read make_ad_default
-    make_ad_default=${make_ad_default:-n}
+    echo "E-AC3 encoding failed. Exiting."
+    exit 1
 fi
 
-# Ask for the output file name
-echo "What would you like to call the output file (excluding extension)? Leave blank for default naming."
-read output_filename_base
-if [ -z "$output_filename_base" ]; then
-    output_filename_base="ad_${video_file%.*}_with_AD"
-fi
-output_video="${output_filename_base}.mp4"
+# Ask if the AD track should be the default track
+echo "Do you want to make the AD track the default audio track? (y/n, default: y)"
+read make_ad_default
+make_ad_default=${make_ad_default:-y}
 
-# Construct the ffmpeg command
-ffmpeg_cmd="ffmpeg -i \"$video_file\" -i \"$stereo_audio_file\" -map 0:v -c:v copy"
+# Construct the ffmpeg command for muxing
+ffmpeg_cmd="ffmpeg -i \"$video_file\" -i \"$eac3_audio_file\" -map 0:v -c:v copy"
 
-if [ "$remove_original_audio" -eq 1 ]; then
-    ffmpeg_cmd+=" -map 1:a -metadata:s:a:0 language=eng -metadata:s:a:0 title=\"English - Audio Description Stereo\""
+# Add the AD track as the first audio stream (force copy of E-AC3)
+ffmpeg_cmd+=" -map 1:a -c:a:0 copy -metadata:s:a:0 language=eng -metadata:s:a:0 title=\"English - Audio Description E-AC3\""
+
+# Add the original audio track as the second audio stream
+ffmpeg_cmd+=" -map 0:a -c:a:1 copy -metadata:s:a:1 language=eng -metadata:s:a:1 title=\"English - Original Audio\""
+
+# Handle default audio track disposition
+if [[ "$make_ad_default" =~ ^[yY]$ ]]; then
+    ffmpeg_cmd+=" -disposition:a:0 default -disposition:a:1 none"
 else
-    ffmpeg_cmd+=" -map 0:a -map 1:a"
-
-    # If AD track should be default
-    if [[ "$make_ad_default" == "y" || "$make_ad_default" == "Y" ]]; then
-        ffmpeg_cmd+=" -disposition:a:1 default -metadata:s:a:1 language=eng -metadata:s:a:1 title=\"English - Audio Description Stereo\""
-    else
-        ffmpeg_cmd+=" -disposition:a:0 default -metadata:s:a:1 language=eng -metadata:s:a:1 title=\"English - Audio Description Stereo\""
-    fi
+    ffmpeg_cmd+=" -disposition:a:1 default -disposition:a:0 none"
 fi
 
 ffmpeg_cmd+=" \"$output_video\""
@@ -105,3 +68,16 @@ ffmpeg_cmd+=" \"$output_video\""
 echo "Executing command:"
 echo $ffmpeg_cmd
 eval $ffmpeg_cmd
+
+# Verify the output
+if [[ -f "$output_video" ]]; then
+    echo "Muxing completed successfully: $output_video"
+
+    # Cleanup intermediate files
+    echo "Cleaning up intermediate files..."
+    rm -f "$eac3_audio_file"
+    echo "Removed: $eac3_audio_file"
+else
+    echo "Muxing failed. Exiting."
+    exit 1
+fi
