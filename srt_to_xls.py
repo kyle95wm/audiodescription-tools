@@ -5,9 +5,10 @@ import re
 import argparse
 from datetime import timedelta
 import openpyxl
+from openpyxl.styles import Font, Alignment
 from openpyxl.utils.dataframe import dataframe_to_rows
 import os
-import copy  # For handling style copying
+import copy
 
 def srt_to_smpte(timecode, frame_rate):
     """Convert SRT timecode to SMPTE timecode."""
@@ -45,20 +46,23 @@ def parse_srt(srt_file, frame_rate):
 
     return data
 
-def copy_style(source_cell, target_cell):
-    """Copy style from one cell to another using updated methods."""
-    if source_cell.font:
-        target_cell.font = copy.copy(source_cell.font)
-    if source_cell.border:
-        target_cell.border = copy.copy(source_cell.border)
-    if source_cell.fill:
-        target_cell.fill = copy.copy(source_cell.fill)
-    if source_cell.number_format:
-        target_cell.number_format = source_cell.number_format
-    if source_cell.protection:
-        target_cell.protection = copy.copy(source_cell.protection)
-    if source_cell.alignment:
-        target_cell.alignment = copy.copy(source_cell.alignment)
+def create_default_template():
+    """Create a default Excel workbook that matches the provided template."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Studio Script"
+
+    # Define headers
+    headers = ["Line Number", "Timecode In", "Timecode Out", "Script (en)", "On Screen Note (en)"]
+    column_widths = [12, 15, 15, 50, 30]  # Define column widths
+
+    for col_num, (header, width) in enumerate(zip(headers, column_widths), start=1):
+        cell = ws.cell(row=1, column=col_num, value=header)
+        cell.font = Font(bold=True, size=16)  # Bold headers with size 16
+        cell.alignment = Alignment(horizontal="center", wrap_text=True)  # Centered and wrapped
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col_num)].width = width  # Set column width
+
+    return wb
 
 def srt_to_excel(srt_file, excel_file, frame_rate, template_file=None):
     """Convert the parsed SRT data into an Excel file, optionally using a template."""
@@ -69,32 +73,25 @@ def srt_to_excel(srt_file, excel_file, frame_rate, template_file=None):
     if not excel_file.lower().endswith('.xlsx'):
         excel_file += '.xlsx'
 
-    # If a template is provided and exists, use it
+    # Use the template file if provided and exists, otherwise use default template
     if template_file and os.path.exists(template_file):
         wb = openpyxl.load_workbook(template_file)
         ws = wb.active
-
-        # Find the last row with formatting
-        last_row_with_format = ws.max_row
-
-        # Start writing data from the second row
-        for r_idx, row in enumerate(dataframe_to_rows(df, index=False, header=False), 2):
-            for c_idx, value in enumerate(row, 1):
-                cell = ws.cell(row=r_idx, column=c_idx, value=value)
-                if r_idx <= last_row_with_format:
-                    # Copy formatting from the last formatted row
-                    template_cell = ws.cell(row=last_row_with_format, column=c_idx)
-                    copy_style(template_cell, cell)
-
-        wb.save(excel_file)
     else:
-        # Warn user that no template is being used
-        if template_file:
-            print(f"Warning: Template file '{template_file}' not found. Proceeding without a template.")
+        print(f"Warning: Template file '{template_file}' not found. Using default template.")
+        wb = create_default_template()
+        ws = wb.active
 
-        # Save the data without a template
-        with pd.ExcelWriter(excel_file, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, startrow=1)
+    # Start writing data from the second row (below the header)
+    for r_idx, row in enumerate(dataframe_to_rows(df, index=False, header=False), start=2):
+        for c_idx, value in enumerate(row, start=1):
+            cell = ws.cell(row=r_idx, column=c_idx, value=value)
+            cell.font = Font(size=16)  # Set font size to 16 for all cells
+            if isinstance(value, str):  # Enable text wrapping for string values
+                cell.alignment = Alignment(wrap_text=True)
+
+    # Allow Excel to auto-adjust row heights for wrapped text
+    wb.save(excel_file)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Convert SRT file to Excel AD script.')
