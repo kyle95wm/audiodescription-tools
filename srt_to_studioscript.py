@@ -90,7 +90,11 @@ def srt_to_excel(srt_file, excel_file, frame_rate, template_file=None):
             if isinstance(value, str):  # Enable text wrapping for string values
                 cell.alignment = Alignment(wrap_text=True)
 
-    # Allow Excel to auto-adjust row heights for wrapped text
+    # Clear fixed row heights to enable dynamic adjustment
+    for row_dim in ws.row_dimensions.values():
+        row_dim.height = None
+
+    # Save the updated workbook
     wb.save(excel_file)
 
 if __name__ == "__main__":
