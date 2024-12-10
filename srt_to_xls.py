@@ -69,7 +69,8 @@ def srt_to_excel(srt_file, excel_file, frame_rate, template_file=None):
     if not excel_file.lower().endswith('.xlsx'):
         excel_file += '.xlsx'
 
-    if template_file:
+    # If a template is provided and exists, use it
+    if template_file and os.path.exists(template_file):
         wb = openpyxl.load_workbook(template_file)
         ws = wb.active
 
@@ -87,6 +88,11 @@ def srt_to_excel(srt_file, excel_file, frame_rate, template_file=None):
 
         wb.save(excel_file)
     else:
+        # Warn user that no template is being used
+        if template_file:
+            print(f"Warning: Template file '{template_file}' not found. Proceeding without a template.")
+
+        # Save the data without a template
         with pd.ExcelWriter(excel_file, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, startrow=1)
 
