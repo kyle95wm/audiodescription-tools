@@ -1,134 +1,88 @@
+import os
 import argparse
 import subprocess
-import json
 
+# Supported formats
+SUPPORTED_FORMATS = ['.mp4', '.mkv', '.wav', '.mp3', '.aac', '.eac3']
 
-def get_input(prompt, default=None):
-    """Get user input with an optional default value."""
-    value = input(f"{prompt} [{'Default: ' + str(default) if default else ''}]: ").strip()
-    return value if value else default
-
-
-def measure_dlra(input_file):
-    """Measure Dialogue Loudness Range using FFmpeg's ebur128 filter."""
-    print("\nMeasuring Dialogue Loudness Range (DLRA)...")
-    command = [
+def process_file(input_file, output_file, profile, aggressive_compression, audio_format, bitrate):
+    # Base FFmpeg command
+    ffmpeg_cmd = [
         "ffmpeg",
         "-i", input_file,
-        "-filter_complex", "ebur128=framelog=verbose",
-        "-f", "null",
-        "-"
+        "-af", f"acompressor=threshold=-18dB:ratio=3:attack=10:release=200,loudnorm=I={profile['LUFS']}:LRA={profile['LRA']}:TP={profile['TP']}"
     ]
-    try:
-        subprocess.run(command, check=True)
-    except subprocess.CalledProcessError:
-        print("\nAn error occurred while measuring DLRA. Ensure the input file is valid.")
+    
+    # Add aggressive compression
+    if aggressive_compression:
+        ffmpeg_cmd[3] = f"acompressor=threshold=-24dB:ratio=4:attack=5:release=150,{ffmpeg_cmd[3]}"
+    
+    # Set audio codec and format
+    if audio_format == "aac":
+        ffmpeg_cmd += ["-c:a", "aac", "-b:a", bitrate, "-c:v", "copy"]
+    elif audio_format == "eac3":
+        ffmpeg_cmd += ["-c:a", "eac3", "-b:a", bitrate]
+    elif audio_format == "mp3":
+        ffmpeg_cmd += ["-c:a", "libmp3lame", "-q:a", "2"]
+    elif audio_format == "wav":
+        ffmpeg_cmd += ["-c:a", "pcm_s16le"]
+    else:
+        raise ValueError(f"Unsupported audio format: {audio_format}")
+    
+    # Set output file
+    ffmpeg_cmd += [output_file]
 
+    # Execute FFmpeg command
+    subprocess.run(ffmpeg_cmd, check=True)
+
+def get_files_from_directory(directory):
+    files = []
+    for root, _, filenames in os.walk(directory):
+        for filename in filenames:
+            if any(filename.endswith(ext) for ext in SUPPORTED_FORMATS):
+                files.append(os.path.join(root, filename))
+    return files
 
 def main():
-    # Parse command-line arguments
-    parser = argparse.ArgumentParser(
-        description="Normalize and master audio/video files with customizable loudness, true peak, and loudness range."
-    )
-    parser.add_argument("input_file", help="Path to the input audio or video file")
-    parser.add_argument("output_file", help="Path to the output mastered file")
+    parser = argparse.ArgumentParser(description="Batch Mastering Script")
+    parser.add_argument("input", help="Input file or directory")
+    parser.add_argument("output", help="Output file or directory")
+    parser.add_argument("--profile", type=str, default="Broadcast TV", choices=["Broadcast TV", "Streaming Platforms", "Netflix", "YouTube", "AudioVault", "Custom"], help="Loudness profile")
+    parser.add_argument("--format", type=str, default="aac", choices=["aac", "mp3", "eac3", "wav"], help="Output audio format")
+    parser.add_argument("--bitrate", type=str, default="192k", help="Audio bitrate (e.g., 192k, 320k)")
+    parser.add_argument("--aggressive", action="store_true", help="Apply aggressive compression")
     args = parser.parse_args()
 
-    # Step 1: Measure DLRA (optional)
-    measure_choice = get_input("\nWould you like to measure DLRA before mastering? (y/n)", "n")
-    if measure_choice.lower() == "y":
-        measure_dlra(args.input_file)
-
-    # Step 2: Choose audio compression type
-    print("\nChoose audio format:")
-    print("1. Compressed AAC (Default for MP4)")
-    print("2. Uncompressed PCM (WAV-like quality)")
-    print("3. Compressed MP3")
-    print("4. Compressed EAC-3 (Dolby Digital Plus)")
-    audio_map = {"1": "aac", "2": "pcm_s24le", "3": "libmp3lame", "4": "eac3"}
-    audio_choice = get_input("Enter your choice (1/2/3/4)", "1")
-    audio_codec = audio_map.get(audio_choice, "aac")
-
-    # Step 3: Handle profiles
-    print("\nChoose a loudness profile:")
-    print("1. Broadcast TV (-24 LUFS, -2 dBTP, 6 LRA)")
-    print("2. Streaming Platforms (-16 LUFS, -1 dBTP, 6 LRA)")
-    print("3. Netflix (-27 LUFS, -2 dBTP, DLRA ≤10 LU)")
-    print("4. YouTube (-14 LUFS, -1 dBTP, ≤8 LRA)")
-    if audio_choice == "3":  # Only show AudioVault for MP3
-        print("5. AudioVault (-16.3 LUFS, -2.6 dBTP, 5 LRA, MP3-only)")
-    print("6. Spotify (-14 LUFS, -1 dBTP, ≤8 LRA)")
-    print("7. Apple Podcasts (-16 LUFS, -1 dBTP, ≤8 LRA)")
-    print("8. Custom (Specify your own values)")
-    profile_choice = get_input("Enter your choice (1/2/3/4/5/6/7/8)", "1")
-
-    # Step 4: Set loudness parameters
-    loudness_map = {
-        "1": {"I": "-24", "TP": "-2", "LRA": "6"},
-        "2": {"I": "-16", "TP": "-1", "LRA": "6"},
-        "3": {"I": "-27", "TP": "-2", "LRA": "6"},
-        "4": {"I": "-14", "TP": "-1", "LRA": "8"},
-        "5": {"I": "-16.3", "TP": "-2.6", "LRA": "5"},
-        "6": {"I": "-14", "TP": "-1", "LRA": "8"},
-        "7": {"I": "-16", "TP": "-1", "LRA": "8"},
+    # Define profiles
+    profiles = {
+        "Broadcast TV": {"LUFS": -24, "TP": -2, "LRA": 6},
+        "Streaming Platforms": {"LUFS": -16, "TP": -1, "LRA": 6},
+        "Netflix": {"LUFS": -27, "TP": -2, "LRA": 10},
+        "YouTube": {"LUFS": -14, "TP": -1, "LRA": 8},
+        "AudioVault": {"LUFS": -16.3, "TP": -2.6, "LRA": 5},
     }
 
-    if profile_choice in loudness_map:
-        profile = loudness_map[profile_choice]
-        target_lufs = profile["I"]
-        target_tp = profile["TP"]
-        target_lra = profile["LRA"]
-    else:  # Custom Profile
-        print("\nCustom Profile Selected!")
-        target_lufs = get_input("Enter target integrated loudness (e.g., -24)", "-24")
-        target_tp = get_input("Enter true peak limit (e.g., -2)", "-2")
-        target_lra = get_input("Enter loudness range (e.g., 6)", "6")
+    # Custom profile
+    if args.profile == "Custom":
+        lufs = float(input("Enter target LUFS: "))
+        tp = float(input("Enter true peak (dBTP): "))
+        lra = float(input("Enter loudness range (LRA): "))
+        profiles["Custom"] = {"LUFS": lufs, "TP": tp, "LRA": lra}
 
-    # Step 5: Add optional aggressive compression
-    apply_compression = get_input("\nWould you like to add aggressive compression? (y/n)", "n")
-    if apply_compression.lower() == "y":
-        compression_filter = "acompressor=threshold=-18dB:ratio=3:attack=10:release=200,"
+    # Determine input type
+    if os.path.isdir(args.input):
+        files = get_files_from_directory(args.input)
+        os.makedirs(args.output, exist_ok=True)  # Ensure output directory exists
+        for file in files:
+            output_file = os.path.join(args.output, os.path.basename(file))
+            process_file(file, output_file, profiles[args.profile], args.aggressive, args.format, args.bitrate)
+    elif os.path.isfile(args.input):
+        process_file(args.input, args.output, profiles[args.profile], args.aggressive, args.format, args.bitrate)
     else:
-        compression_filter = ""
+        print("Invalid input. Please specify a valid file or directory.")
+        return
 
-    # Step 6: Handle EAC-3-specific options
-    eac3_bitrate = None
-    dialnorm = None
-    if audio_codec == "eac3":
-        dialnorm = round(float(target_lufs))  # Set Dialnorm to match loudness target
-        eac3_bitrate = get_input("Enter EAC-3 bitrate (Default: 192k)", "192k")
-
-    # Step 7: Loudness normalization
-    print("\nProcessing your file (loudness normalization)...")
-    ffmpeg_command = [
-        "ffmpeg",
-        "-i", args.input_file,
-        "-af",
-        f"{compression_filter}loudnorm=I={target_lufs}:LRA={target_lra}:TP={target_tp}",
-    ]
-
-    if audio_choice == "3":  # MP3-specific settings
-        mp3_bitrate = get_input("Enter MP3 bitrate (e.g., 128k, 192k, 320k)", "192k")
-        ffmpeg_command.extend(["-vn", "-c:a", "libmp3lame", "-b:a", mp3_bitrate])
-    elif audio_choice == "4":  # EAC-3-specific settings
-        ffmpeg_command.extend([
-            "-c:v", "copy",
-            "-c:a", "eac3",
-            "-b:a", eac3_bitrate,
-            "-metadata", f"dialnorm={dialnorm}"
-        ])
-    else:
-        ffmpeg_command.extend(["-c:v", "copy", "-c:a", audio_codec])
-
-    ffmpeg_command.append(args.output_file)
-
-    print("Executing FFmpeg command:", " ".join(ffmpeg_command))  # Debugging: Show full command
-    try:
-        subprocess.run(ffmpeg_command, check=True)
-        print(f"\nMastering complete! Your file has been saved to {args.output_file}")
-    except subprocess.CalledProcessError:
-        print("\nAn error occurred during processing. Please check your input file and try again.")
-
+    print("Batch processing complete!")
 
 if __name__ == "__main__":
     main()
