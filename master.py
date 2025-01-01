@@ -1,88 +1,87 @@
+#!/usr/bin/env python3
+
 import os
-import argparse
 import subprocess
+import argparse
 
-# Supported formats
-SUPPORTED_FORMATS = ['.mp4', '.mkv', '.wav', '.mp3', '.aac', '.eac3']
+PROFILES = {
+    "1": ("Broadcast TV", "-24", "8", "-2"),
+    "2": ("Streaming Platforms", "-23", "10", "-1"),
+    "3": ("Netflix", "-27", "9", "-2"),
+    "4": ("YouTube", "-14", "7", "-1"),
+    "5": ("AudioVault", "-16.3", "5", "-2.6"),
+}
 
-def process_file(input_file, output_file, profile, aggressive_compression, audio_format, bitrate):
-    # Base FFmpeg command
+FORMATS = {
+    "1": "aac",
+    "2": "mp3",
+    "3": "eac3",
+    "4": "wav"
+}
+
+def select_option(prompt, options, default=None):
+    print(prompt)
+    for key, value in options.items():
+        print(f"{key}. {value}")
+    choice = input(f"Select option [{default}]: ")
+    return options.get(choice, options[default])
+
+
+def process_file(input_file, output_file, profile, aggressive, audio_format, bitrate):
+    profile_name, i_lufs, lra, tp = PROFILES[profile]
+    compression = 'acompressor=threshold=-18dB:ratio=3:attack=10:release=200,' if aggressive else ''
     ffmpeg_cmd = [
-        "ffmpeg",
-        "-i", input_file,
-        "-af", f"acompressor=threshold=-18dB:ratio=3:attack=10:release=200,loudnorm=I={profile['LUFS']}:LRA={profile['LRA']}:TP={profile['TP']}"
+        'ffmpeg', '-i', input_file,
+        '-af', f'{compression}loudnorm=I={i_lufs}:LRA={lra}:TP={tp}',
+        '-c:a', 'libmp3lame' if audio_format == 'mp3' else (f'lib{audio_format}' if audio_format != 'wav' else 'pcm_s16le'),
+        '-b:a', bitrate,
+        output_file
     ]
-    
-    # Add aggressive compression
-    if aggressive_compression:
-        ffmpeg_cmd[3] = f"acompressor=threshold=-24dB:ratio=4:attack=5:release=150,{ffmpeg_cmd[3]}"
-    
-    # Set audio codec and format
-    if audio_format == "aac":
-        ffmpeg_cmd += ["-c:a", "aac", "-b:a", bitrate, "-c:v", "copy"]
-    elif audio_format == "eac3":
-        ffmpeg_cmd += ["-c:a", "eac3", "-b:a", bitrate]
-    elif audio_format == "mp3":
-        ffmpeg_cmd += ["-c:a", "libmp3lame", "-q:a", "2"]
-    elif audio_format == "wav":
-        ffmpeg_cmd += ["-c:a", "pcm_s16le"]
-    else:
-        raise ValueError(f"Unsupported audio format: {audio_format}")
-    
-    # Set output file
-    ffmpeg_cmd += [output_file]
+    try:
+        print(f"Processing: {input_file}")
+        subprocess.run(ffmpeg_cmd, check=True)
+        print(f"✅ Saved: {output_file}")
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Error processing {input_file}")
+        print(e)
 
-    # Execute FFmpeg command
-    subprocess.run(ffmpeg_cmd, check=True)
 
-def get_files_from_directory(directory):
-    files = []
-    for root, _, filenames in os.walk(directory):
-        for filename in filenames:
-            if any(filename.endswith(ext) for ext in SUPPORTED_FORMATS):
-                files.append(os.path.join(root, filename))
-    return files
+def process_directory(input_path, output_path, profile, aggressive, audio_format, bitrate):
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
+    
+    for input_file in os.listdir(input_path):
+        full_input_path = os.path.join(input_path, input_file)
+        if os.path.isfile(full_input_path):
+            base_name = os.path.splitext(input_file)[0]
+            output_file = os.path.join(output_path, f"{base_name}.{audio_format}")
+            process_file(full_input_path, output_file, profile, aggressive, audio_format, bitrate)
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Batch Mastering Script")
-    parser.add_argument("input", help="Input file or directory")
-    parser.add_argument("output", help="Output file or directory")
-    parser.add_argument("--profile", type=str, default="Broadcast TV", choices=["Broadcast TV", "Streaming Platforms", "Netflix", "YouTube", "AudioVault", "Custom"], help="Loudness profile")
-    parser.add_argument("--format", type=str, default="aac", choices=["aac", "mp3", "eac3", "wav"], help="Output audio format")
-    parser.add_argument("--bitrate", type=str, default="192k", help="Audio bitrate (e.g., 192k, 320k)")
-    parser.add_argument("--aggressive", action="store_true", help="Apply aggressive compression")
-    args = parser.parse_args()
+    input_path = input("Enter the path to the input file or directory (leave blank for current directory): ").strip()
+    if not input_path:
+        input_path = os.getcwd()
+    
+    print("1. Broadcast TV\n2. Streaming Platforms\n3. Netflix\n4. YouTube\n5. AudioVault\n6. Custom")
+    profile = input("Select loudness profile [Broadcast TV]: ").strip() or "1"
+    
+    aggressive = input("Apply aggressive compression? (y/n) [n]: ").strip().lower() == 'y'
+    output_path = input("Enter the path for the output file or directory [output]: ").strip() or "output"
+    
+    print("1. AAC\n2. MP3\n3. EAC3\n4. WAV")
+    audio_format = select_option("Select output format", FORMATS, "1")
+    
+    bitrate = input("Enter audio bitrate (e.g., 192k, 320k) [192k]: ").strip() or "192k"
 
-    # Define profiles
-    profiles = {
-        "Broadcast TV": {"LUFS": -24, "TP": -2, "LRA": 6},
-        "Streaming Platforms": {"LUFS": -16, "TP": -1, "LRA": 6},
-        "Netflix": {"LUFS": -27, "TP": -2, "LRA": 10},
-        "YouTube": {"LUFS": -14, "TP": -1, "LRA": 8},
-        "AudioVault": {"LUFS": -16.3, "TP": -2.6, "LRA": 5},
-    }
-
-    # Custom profile
-    if args.profile == "Custom":
-        lufs = float(input("Enter target LUFS: "))
-        tp = float(input("Enter true peak (dBTP): "))
-        lra = float(input("Enter loudness range (LRA): "))
-        profiles["Custom"] = {"LUFS": lufs, "TP": tp, "LRA": lra}
-
-    # Determine input type
-    if os.path.isdir(args.input):
-        files = get_files_from_directory(args.input)
-        os.makedirs(args.output, exist_ok=True)  # Ensure output directory exists
-        for file in files:
-            output_file = os.path.join(args.output, os.path.basename(file))
-            process_file(file, output_file, profiles[args.profile], args.aggressive, args.format, args.bitrate)
-    elif os.path.isfile(args.input):
-        process_file(args.input, args.output, profiles[args.profile], args.aggressive, args.format, args.bitrate)
+    if os.path.isdir(input_path):
+        print(f"🔄 Processing all files in directory: {input_path}")
+        process_directory(input_path, output_path, profile, aggressive, audio_format, bitrate)
     else:
-        print("Invalid input. Please specify a valid file or directory.")
-        return
+        base_name = os.path.splitext(os.path.basename(input_path))[0]
+        output_file = os.path.join(output_path, f"{base_name}.{audio_format}")
+        process_file(input_path, output_file, profile, aggressive, audio_format, bitrate)
 
-    print("Batch processing complete!")
 
 if __name__ == "__main__":
     main()
