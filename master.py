@@ -1,62 +1,91 @@
 #!/usr/bin/env python3
+
 import os
 import argparse
 import subprocess
 
-# Supported formats
-SUPPORTED_FORMATS = ['.mp4', '.mkv', '.wav', '.mp3', '.aac', '.eac3']
+# Supported video formats for processing
+SUPPORTED_FORMATS = ['.mp4', '.mkv', '.mov']
 
 def process_file(input_file, output_file, profile, aggressive_compression, audio_format, bitrate, highpass):
-    # Base FFmpeg command
-    audio_filter = ""
-    
+    """
+    Process the audio from the input file by applying loudness normalization, compression, 
+    and optional high-pass filtering. The processed audio is muxed back into the video without re-encoding the video.
+
+    Args:
+        input_file (str): Path to the input video file.
+        output_file (str): Path to the output video file with processed audio.
+        profile (dict): Loudness profile (LUFS, TP, LRA).
+        aggressive_compression (bool): Whether to apply aggressive compression.
+        audio_format (str): Desired audio output format (aac, mp3, eac3, wav).
+        bitrate (str): Audio bitrate (e.g., 192k).
+        highpass (bool): Apply a high-pass filter at 80Hz to remove low frequencies.
+    """
+
+    # Step 1: Build audio filter chain
+    filters = []
+
+    # Apply high-pass filter (if specified)
     if highpass:
-        audio_filter += "highpass=f=80,"
-
+        filters.append("highpass=f=80")
+    
+    # Apply aggressive compression (optional)
     if aggressive_compression:
-        audio_filter += "acompressor=threshold=-24dB:ratio=4:attack=5:release=150,"
+        filters.append("acompressor=threshold=-24dB:ratio=4:attack=5:release=150")
 
-    audio_filter += "acompressor=threshold=-18dB:ratio=3:attack=10:release=200,"
-    audio_filter += f"loudnorm=I={profile['LUFS']}:LRA={profile['LRA']}:TP={profile['TP']}"
+    # Standard compression and loudness normalization
+    filters.append("acompressor=threshold=-18dB:ratio=3:attack=10:release=200")
+    filters.append(f"loudnorm=I={profile['LUFS']}:LRA={profile['LRA']}:TP={profile['TP']}")
 
+    # Join filters into a single string for FFmpeg
+    filter_chain = ",".join(filters)
+
+    # Temporary audio file (processed audio only)
+    temp_audio = f"{os.path.splitext(output_file)[0]}_temp.{audio_format}"
+
+    # Step 2: Extract and process audio
     ffmpeg_cmd = [
         "ffmpeg",
-        "-i", input_file,
-        "-af", audio_filter,
+        "-i", input_file,                # Input video file
+        "-af", filter_chain,             # Apply audio filters
+        "-c:a", f"lib{audio_format}" if audio_format != 'wav' else "pcm_s24le",  # Audio codec
+        "-b:a", bitrate,                 # Bitrate for output audio
+        temp_audio                       # Temporary processed audio file
     ]
 
-    # Set audio codec and format
-    if audio_format == "aac":
-        ffmpeg_cmd += ["-c:a", "aac", "-b:a", bitrate]
-    elif audio_format == "eac3":
-        ffmpeg_cmd += ["-c:a", "eac3", "-b:a", bitrate]
-    elif audio_format == "mp3":
-        ffmpeg_cmd += ["-c:a", "libmp3lame", "-b:a", bitrate]
-    elif audio_format == "wav":
-        ffmpeg_cmd += ["-c:a", "pcm_s24le", "-write_bext", "1", "-rf64", "auto"]
-    else:
-        raise ValueError(f"Unsupported audio format: {audio_format}")
-    
-    ffmpeg_cmd += [output_file]
-    subprocess.run(ffmpeg_cmd, check=True)
-    print(f"✅ Processed: {output_file}")
+    print(f"🔄 Processing audio from: {input_file}")
+    subprocess.run(ffmpeg_cmd, check=True)  # Execute the FFmpeg command
 
-
-def mux_audio_to_video(input_video, processed_audio, output_video):
-    ffmpeg_cmd = [
-        "ffmpeg", "-i", input_video,
-        "-i", processed_audio,
-        "-c:v", "copy",  # Copy video stream without re-encoding
-        "-map", "0:v:0",  # Map video from input 0
-        "-map", "1:a:0",  # Map audio from input 1
-        "-shortest",
-        output_video
+    # Step 3: Mux the processed audio with the original video (without re-encoding video)
+    ffmpeg_mux_cmd = [
+        "ffmpeg",
+        "-i", input_file,                # Input original video
+        "-i", temp_audio,                # Input processed audio
+        "-c:v", "copy",                  # Copy the video stream without re-encoding
+        "-map", "0:v:0",                 # Map the video stream from the original input
+        "-map", "1:a:0",                 # Map the audio stream from the processed audio
+        "-shortest",                     # Ensure the muxed file ends when the shortest stream ends
+        output_file                      # Output final video file
     ]
-    subprocess.run(ffmpeg_cmd, check=True)
-    print(f"✅ Muxed: {output_video}")
+
+    print(f"🔄 Muxing processed audio into: {output_file}")
+    subprocess.run(ffmpeg_mux_cmd, check=True)
+
+    # Step 4: Remove the temporary audio file after muxing
+    os.remove(temp_audio)
+    print(f"🗑️ Removed temporary audio file: {temp_audio}")
 
 
 def get_files_from_directory(directory):
+    """
+    Recursively get all video files from the specified directory.
+
+    Args:
+        directory (str): Path to the input directory.
+    
+    Returns:
+        list: List of file paths for all supported video formats.
+    """
     files = []
     for root, _, filenames in os.walk(directory):
         for filename in filenames:
@@ -66,17 +95,29 @@ def get_files_from_directory(directory):
 
 
 def main():
+    """
+    Main entry point of the script. Handles argument parsing, profile selection,
+    and batch processing of files.
+    """
+    # Step 1: Argument parser for CLI options
     parser = argparse.ArgumentParser(description="Batch Audio Mastering and Muxing Script")
     parser.add_argument("input", help="Input file or directory")
     parser.add_argument("output", help="Output file or directory")
-    parser.add_argument("--profile", type=str, default="Broadcast TV", choices=["Broadcast TV", "Streaming Platforms", "Netflix", "YouTube", "AudioVault", "Custom"], help="Loudness profile")
-    parser.add_argument("--format", type=str, default="aac", choices=["aac", "mp3", "eac3", "wav"], help="Output audio format")
-    parser.add_argument("--bitrate", type=str, default="192k", help="Audio bitrate (e.g., 192k, 320k)")
-    parser.add_argument("--aggressive", action="store_true", help="Apply aggressive compression")
-    parser.add_argument("--highpass", action="store_true", help="Apply high pass filter at 80 Hz to cut subwoofer frequencies")
+    parser.add_argument("--profile", type=str, default="Broadcast TV", 
+                        choices=["Broadcast TV", "Streaming Platforms", "Netflix", "YouTube", "AudioVault", "Custom"], 
+                        help="Loudness profile")
+    parser.add_argument("--format", type=str, default="mp3", 
+                        choices=["aac", "mp3", "eac3", "wav"], 
+                        help="Output audio format")
+    parser.add_argument("--bitrate", type=str, default="192k", 
+                        help="Audio bitrate (e.g., 192k, 320k)")
+    parser.add_argument("--aggressive", action="store_true", 
+                        help="Apply aggressive compression")
+    parser.add_argument("--highpass", action="store_true", 
+                        help="Apply high-pass filter at 80Hz (cuts subwoofer)")
     args = parser.parse_args()
 
-    # Define profiles
+    # Step 2: Define loudness profiles (LUFS, TP, LRA values)
     profiles = {
         "Broadcast TV": {"LUFS": -24, "TP": -2, "LRA": 6},
         "Streaming Platforms": {"LUFS": -16, "TP": -1, "LRA": 6},
@@ -85,44 +126,32 @@ def main():
         "AudioVault": {"LUFS": -16.3, "TP": -2.6, "LRA": 5},
     }
 
-    # Handle Custom Profile
+    # Step 3: Handle custom profile input (prompt for LUFS, TP, LRA values)
     if args.profile == "Custom":
         lufs = float(input("Enter target LUFS: "))
         tp = float(input("Enter true peak (dBTP): "))
         lra = float(input("Enter loudness range (LRA): "))
 
-        # Automatically correct positive LUFS and TP values
-        lufs = lufs if lufs < 0 else -abs(lufs)
-        tp = tp if tp < 0 else -abs(tp)
+        # Correct positive values to negative
+        lufs = lufs if lufs <= 0 else -lufs
+        tp = tp if tp <= 0 else -tp
 
         profiles["Custom"] = {"LUFS": lufs, "TP": tp, "LRA": lra}
 
-    # Determine if input is directory or file
+    # Step 4: Process input (file or directory)
     if os.path.isdir(args.input):
         files = get_files_from_directory(args.input)
-        os.makedirs(args.output, exist_ok=True)
+        os.makedirs(args.output, exist_ok=True)  # Create output directory if not exists
         for file in files:
-            base_name = os.path.splitext(os.path.basename(file))[0]
-            temp_audio_file = os.path.join(args.output, f"{base_name}_processed.{args.format}")
-            output_video_file = os.path.join(args.output, f"{base_name}_muxed.mp4")
-            
-            process_file(file, temp_audio_file, profiles[args.profile], args.aggressive, args.format, args.bitrate, args.highpass)
-            mux_audio_to_video(file, temp_audio_file, output_video_file)
+            output_file = os.path.join(args.output, os.path.basename(file))
+            process_file(file, output_file, profiles[args.profile], args.aggressive, args.format, args.bitrate, args.highpass)
     elif os.path.isfile(args.input):
-        base_name = os.path.splitext(os.path.basename(args.input))[0]
-        temp_audio_file = f"{base_name}_processed.{args.format}"
-        process_file(args.input, temp_audio_file, profiles[args.profile], args.aggressive, args.format, args.bitrate, args.highpass)
-        
-        # If output is a video, perform muxing
-        if args.output.endswith(('.mp4', '.mkv')):
-            mux_audio_to_video(args.input, temp_audio_file, args.output)
-        else:
-            os.rename(temp_audio_file, args.output)
+        process_file(args.input, args.output, profiles[args.profile], args.aggressive, args.format, args.bitrate, args.highpass)
     else:
         print("Invalid input. Please specify a valid file or directory.")
         return
 
-    print("Batch processing complete!")
+    print("✅ Batch processing complete!")
 
 
 if __name__ == "__main__":
