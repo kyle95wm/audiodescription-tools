@@ -1,0 +1,42 @@
+#!/bin/bash
+
+# Function to compress a single video file with SMPTE timecode overlay
+compress_file() {
+    input_file="$1"
+    output_file="cmp/${input_file%.mp4}.mp4"
+
+    # Check if the output file already exists
+    if [ -f "$output_file" ]; then
+        echo "Skipping $input_file, compressed version already exists."
+    else
+        echo "Compressing $input_file to $output_file with timecode overlay..."
+
+        # Get the frame rate dynamically
+        fps=$(ffprobe -v 0 -select_streams v:0 -show_entries stream=r_frame_rate -of compact=p=0:nk=1 "$input_file")
+
+        # Apply timecode overlay in the top-right corner
+        ffmpeg -i "$input_file" \
+            -vf "scale=-1:720,drawtext=timecode='00\:00\:00\:00':r=$fps:fontsize=24:fontcolor=white:x=w-tw-20:y=20:box=1:boxcolor=0x000000AA" \
+            -vcodec libx264 -crf 26 \
+            -acodec aac -b:a 128k -ac 2 \
+            "$output_file"
+    fi
+}
+
+# Main logic
+if [ "$1" == "--all" ]; then
+    # Process all MP4 files in the current directory
+    mkdir -p "cmp"
+    for file in *.mp4; do
+        compress_file "$file"
+    done
+elif [ -n "$1" ]; then
+    # Process a single video file
+    mkdir -p "cmp"
+    compress_file "$1"
+else
+    echo "Usage:"
+    echo "  $0 [filename.mp4] - Compress a single video file with timecode overlay."
+    echo "  $0 --all          - Compress all MP4 files in the current directory with timecode overlay."
+    exit 1
+fi
