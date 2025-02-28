@@ -5,7 +5,7 @@ import argparse
 import subprocess
 
 # Supported input/output formats
-SUPPORTED_FORMATS = ['.mp4', '.mkv', '.wav', '.mp3', '.aac', '.eac3']
+SUPPORTED_FORMATS = ['.mp4', '.mkv', '.wav', '.mp3', '.aac', '.eac3', '.m4a', '.ac3']
 
 def process_file(input_file, output_file, profile, aggressive_compression, audio_format, bitrate, highpass, samplerate):
     """
@@ -73,9 +73,9 @@ def main():
     parser.add_argument("--profile", type=str, default="Broadcast TV",
                         choices=["Broadcast TV", "Streaming Platforms", "Netflix", "YouTube", "AudioVault", "Custom"],
                         help="Select loudness profile for normalization")
-    parser.add_argument("--format", type=str, default="aac",
+    parser.add_argument("--format", type=str, default=None,
                         choices=["aac", "mp3", "eac3", "wav"],
-                        help="Output audio format")
+                        help="Output audio format (overridden if output filename has an extension)")
     parser.add_argument("--bitrate", type=str, default="192k",
                         help="Audio bitrate (e.g., 192k, 320k)")
     parser.add_argument("--samplerate", type=int, default=48000,
@@ -107,6 +107,15 @@ def main():
             "TP": -abs(tp),
             "LRA": lra,
         }
+
+    # Determine output format
+    output_ext = os.path.splitext(args.output)[1].lower()
+    if output_ext in SUPPORTED_FORMATS:
+        args.format = output_ext[1:]  # Strip the dot from extension
+    elif args.profile == "AudioVault":
+        args.format = "mp3"  # Force MP3 for AudioVault if no extension overrides it
+    elif args.format is None:
+        args.format = "aac"  # Default format if nothing is specified
 
     # Determine if input is a directory or single file
     if os.path.isdir(args.input):
