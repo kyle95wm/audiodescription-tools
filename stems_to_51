@@ -1,0 +1,35 @@
+#!/bin/bash
+
+# Usage: ./combine_stems_to_5.1.sh MyMix
+
+BASENAME="$1"
+
+if [ -z "$BASENAME" ]; then
+  echo "Usage: $0 <base name> (e.g., 'MyMix' to match 'MyMix_LR.wav' etc.)"
+  exit 1
+fi
+
+LR="${BASENAME}_LR.wav"
+C="${BASENAME}_C.wav"
+LFE="${BASENAME}_LFE.wav"
+SLR="${BASENAME}_sLR.wav"
+OUT="${BASENAME}_5.1.wav"
+
+# Check files exist
+for f in "$LR" "$C" "$LFE" "$SLR"; do
+  if [ ! -f "$f" ]; then
+    echo "Missing file: $f"
+    exit 1
+  fi
+done
+
+# Run ffmpeg to combine
+ffmpeg \
+-i "$LR" \
+-i "$C" \
+-i "$LFE" \
+-i "$SLR" \
+-filter_complex "[0:a]channelsplit=channel_layout=stereo[FL][FR]; \
+                 [3:a]channelsplit=channel_layout=stereo[SL][SR]; \
+                 [FL][FR][1:a][2:a][SL][SR]join=inputs=6:channel_layout=5.1[aout]" \
+-map "[aout]" -c:a pcm_s24le "$OUT"
