@@ -10,7 +10,6 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 import os
 
 def normalize_frame_rate(fps):
-    """Convert common shorthand frame rates to exact float equivalents."""
     known_rates = {
         23.976: 24000 / 1001,
         29.97: 30000 / 1001,
@@ -18,32 +17,24 @@ def normalize_frame_rate(fps):
     }
     return known_rates.get(round(fps, 3), fps)
 
-def srt_to_smpte(timecode, frame_rate):
-    """Convert SRT timecode to SMPTE timecode.
-
-    Frame count is based on real frame rate (e.g., 23.976),
-    but SMPTE display is aligned to runtime (e.g., 24 fps).
-    """
+def srt_to_timecode(timecode, frame_rate, use_realtime=False):
     hours, minutes, seconds, milliseconds = map(int, re.split('[:,]', timecode))
     total_seconds = hours * 3600 + minutes * 60 + seconds + milliseconds / 1000
 
-    # Real total frames based on actual frame rate
-    total_frames = total_seconds * frame_rate
+    if use_realtime:
+        td = timedelta(seconds=total_seconds)
+        return str(td)[:-3]  # Format as HH:MM:SS.mmm
+    else:
+        total_frames = total_seconds * frame_rate
+        smpte_hours = int(total_frames // (3600 * 24))
+        total_frames %= (3600 * 24)
+        smpte_minutes = int(total_frames // (60 * 24))
+        total_frames %= (60 * 24)
+        smpte_seconds = int(total_frames // 24)
+        smpte_frames = int(total_frames % 24)
+        return f"{smpte_hours:02}:{smpte_minutes:02}:{smpte_seconds:02}:{smpte_frames:02}"
 
-    # Convert to SMPTE as if 24 fps
-    smpte_hours = int(total_frames // (3600 * 24))
-    total_frames %= (3600 * 24)
-
-    smpte_minutes = int(total_frames // (60 * 24))
-    total_frames %= (60 * 24)
-
-    smpte_seconds = int(total_frames // 24)
-    smpte_frames = int(total_frames % 24)
-
-    return f"{smpte_hours:02}:{smpte_minutes:02}:{smpte_seconds:02}:{smpte_frames:02}"
-
-def parse_srt(srt_file, frame_rate):
-    """Parse the SRT file and extract line number, timecodes, script text, and notes."""
+def parse_srt(srt_file, frame_rate, use_realtime=False):
     with open(srt_file, 'r') as file:
         content = file.read()
 
@@ -53,8 +44,8 @@ def parse_srt(srt_file, frame_rate):
     data = []
     for match in matches:
         line_number = int(match[0])
-        timecode_in = srt_to_smpte(match[1], frame_rate)
-        timecode_out = srt_to_smpte(match[2], frame_rate)
+        timecode_in = srt_to_timecode(match[1], frame_rate, use_realtime)
+        timecode_out = srt_to_timecode(match[2], frame_rate, use_realtime)
         script_text = match[3].replace('\n', ' ')
 
         bracket_content = re.search(r'\[(.*?)\]', script_text)
@@ -69,7 +60,6 @@ def parse_srt(srt_file, frame_rate):
     return data
 
 def create_default_template():
-    """Create a default Excel workbook that matches the provided template."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Studio Script"
@@ -85,9 +75,8 @@ def create_default_template():
 
     return wb
 
-def srt_to_excel(srt_file, excel_file, frame_rate, template_file=None):
-    """Convert the parsed SRT data into an Excel file, optionally using a template."""
-    data = parse_srt(srt_file, frame_rate)
+def srt_to_excel(srt_file, excel_file, frame_rate, template_file=None, use_realtime=False):
+    data = parse_srt(srt_file, frame_rate, use_realtime)
     df = pd.DataFrame(data, columns=['Line Number', 'Timecode In', 'Timecode Out', 'Script (en)', 'On Screen Note (en)'])
 
     if not excel_file.lower().endswith('.xlsx'):
@@ -119,15 +108,22 @@ if __name__ == "__main__":
     parser.add_argument('excel_file', nargs='?', help='Path to the output Excel file (optional)')
     parser.add_argument('frame_rate', type=float, help='Frame rate of the video (e.g., 23.976, 24, 25, 30)')
     parser.add_argument('--template', help='Path to the Excel template file', default=None)
+    parser.add_argument('-r', '--realtime', action='store_true', help='Use real-time (HH:MM:SS.mmm) instead of SMPTE timecode')
     args = parser.parse_args()
 
     args.frame_rate = normalize_frame_rate(args.frame_rate)
+
+    # Warn or prevent use of --realtime if frame rate is not drop-frame
+    if args.realtime and args.frame_rate in {24, 25, 30}:
+        print("[Notice] Realtime conversion is only meaningful for drop-frame rates. Defaulting to SMPTE format.")
+        args.realtime = False
 
     if not args.template:
         args.template = os.path.expanduser("~/Documents/studioscript_template.xlsx")
 
     if not args.excel_file:
         base_name = os.path.splitext(os.path.basename(args.srt_file))[0]
-        args.excel_file = base_name + "_studioscript.xlsx"
+        suffix = "_realtime" if args.realtime else "_studioscript"
+        args.excel_file = base_name + suffix + ".xlsx"
 
-    srt_to_excel(args.srt_file, args.excel_file, args.frame_rate, args.template)
+    srt_to_excel(args.srt_file, args.excel_file, args.frame_rate, args.template, args.realtime)
