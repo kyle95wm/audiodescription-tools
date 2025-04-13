@@ -29,7 +29,7 @@ def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, 
     filters = []
 
     if not subs_only:
-        filters.append(f"drawtext=fontfile=/Library/Fonts/DroidSansMono.ttf:timecode='00\\:00\\:00\\:00':rate={frame_rate}:fontsize=30:fontcolor=white:x=10:y=10:box=1:boxcolor=0x000000AA")
+        filters.append(f"drawtext=fontfile=/Library/Fonts/DroidSansMono.ttf:timecode='00\\:00\\:00\\:00':rate={frame_rate}:fontsize=20:fontcolor=white:x=10:y=10:box=1:boxcolor=0x000000AA")
 
     if not smpte_only:
         if not os.path.isfile(srt_file):
