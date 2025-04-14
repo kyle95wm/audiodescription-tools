@@ -86,6 +86,15 @@ if __name__ == "__main__":
         subs_only = '--subs-only' in sys.argv
         force_ndf = '--ndf' in sys.argv
 
+        # Warn if --ndf is used on likely Drop Frame content
+        if force_ndf:
+            drop_frame_rates = [29.97, 59.94]
+            frame_rate_check = get_frame_rate(video_file)
+            if any(abs(frame_rate_check - rate) < 0.01 for rate in drop_frame_rates):
+                print(f"⚠️  Warning: {frame_rate_check:.2f} fps is commonly Drop Frame.")
+                print("You are forcing Non-Drop Frame formatting with '--ndf'.")
+                input("Press Enter to continue or Ctrl+C to abort...")
+
         srt_file = None
         font_size = None
 
