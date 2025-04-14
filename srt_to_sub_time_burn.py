@@ -37,8 +37,17 @@ def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, 
             return
 
         subtitles_filter = f"subtitles={srt_file}"
-        if font_size:
-            subtitles_filter += f":force_style='FontSize={font_size},PrimaryColour=&H00FFFFFF&,OutlineColour=&H00000000&,BackColour=&H80000000&,Outline=2,Shadow=3,MarginV=50'"
+        
+        # Always apply styling, default to FontSize=20 if not provided
+        style_parts = [
+            f"FontSize={font_size if font_size else 20}",
+            "PrimaryColour=&H00FFFFFF&",
+            "OutlineColour=&H00000000&",
+            "Outline=2",
+            "Shadow=3",
+            "MarginV=50"
+        ]
+        subtitles_filter += f":force_style='{','.join(style_parts)}'"
         
         filters.append(subtitles_filter)
 
