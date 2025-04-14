@@ -37,8 +37,7 @@ def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, 
             return
 
         subtitles_filter = f"subtitles={srt_file}"
-        
-        # Always apply styling, default to FontSize=20 if not provided
+
         style_parts = [
             f"FontSize={font_size if font_size else 20}",
             "PrimaryColour=&H00FFFFFF&",
@@ -48,7 +47,7 @@ def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, 
             "MarginV=50"
         ]
         subtitles_filter += f":force_style='{','.join(style_parts)}'"
-        
+
         filters.append(subtitles_filter)
 
     ffmpeg_command = [
@@ -76,11 +75,15 @@ if __name__ == "__main__":
         smpte_only = '--smpte-only' in sys.argv
         subs_only = '--subs-only' in sys.argv
 
-        if smpte_only or subs_only:
-            srt_file = None
-            font_size = None
-        else:
+        srt_file = None
+        font_size = None
+
+        if not smpte_only:
             srt_file = sys.argv[2]
-            font_size = int(sys.argv[3]) if len(sys.argv) >= 4 else None
-        
+            if len(sys.argv) >= 4 and not sys.argv[3].startswith('--'):
+                try:
+                    font_size = int(sys.argv[3])
+                except ValueError:
+                    print(f"Warning: Ignoring invalid font size value: {sys.argv[3]}")
+
         burn_subtitles(video_file, srt_file, font_size, smpte_only, subs_only)
