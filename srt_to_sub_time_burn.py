@@ -3,13 +3,11 @@
 import os
 import sys
 import subprocess
-import platform
 
 def get_frame_rate(video_file):
     """Use FFmpeg to get the frame rate of the video."""
     result = subprocess.run(
-        ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
-         '-show_entries', 'stream=r_frame_rate', '-of', 'default=noprint_wrappers=1:nokey=1', video_file],
+        ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=r_frame_rate', '-of', 'default=noprint_wrappers=1:nokey=1', video_file],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
     )
@@ -17,7 +15,7 @@ def get_frame_rate(video_file):
     num, denom = map(int, rate.split('/'))
     return num / denom
 
-def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, subs_only=False, force_ndf=False):
+def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, subs_only=False):
     """Burn subtitles and/or SMPTE timecode into the video."""
     if not os.path.isfile(video_file):
         print(f"Error: The video file '{video_file}' does not exist.")
@@ -31,17 +29,7 @@ def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, 
     filters = []
 
     if not subs_only:
-        drop_frame_rates = [29.97, 59.94]
-        is_drop_frame = any(abs(frame_rate - rate) < 0.01 for rate in drop_frame_rates)
-        separator = ":" if force_ndf else (";" if is_drop_frame else ":")
-        timecode_format = f"00\\{separator}00\\{separator}00\\{separator}00"
-
-        default_font = "/Library/Fonts/DroidSansMono.ttf" if platform.system() == "Darwin" else "Arial"
-
-        filters.append(
-            f"drawtext=fontfile='{default_font}':timecode='{timecode_format}':"
-            f"rate={frame_rate}:fontsize=30:fontcolor=white:x=10:y=10:box=1:boxcolor=0x000000AA"
-        )
+        filters.append(f"drawtext=fontfile=/Library/Fonts/DroidSansMono.ttf:timecode='00\\:00\\:00\\:00':rate={frame_rate}:fontsize=30:fontcolor=white:x=10:y=10:box=1:boxcolor=0x000000AA")
 
     if not smpte_only:
         if not os.path.isfile(srt_file):
@@ -49,6 +37,7 @@ def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, 
             return
 
         subtitles_filter = f"subtitles={srt_file}"
+
         style_parts = [
             f"FontSize={font_size if font_size else 20}",
             "PrimaryColour=&H00FFFFFF&",
@@ -58,6 +47,7 @@ def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, 
             "MarginV=50"
         ]
         subtitles_filter += f":force_style='{','.join(style_parts)}'"
+
         filters.append(subtitles_filter)
 
     ffmpeg_command = [
@@ -77,23 +67,13 @@ def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2 or (len(sys.argv) < 3 and '--smpte-only' not in sys.argv and '--subs-only' not in sys.argv):
-        print("Usage: python burn_subtitles.py <video_file> [<srt_file> [font_size]] [--smpte-only | --subs-only] [--ndf]")
+        print("Usage: python burn_subtitles.py <video_file> [<srt_file> [font_size]] [--smpte-only | --subs-only]")
     elif '--smpte-only' in sys.argv and '--subs-only' in sys.argv:
         print("Error: Cannot use both '--smpte-only' and '--subs-only' at the same time.")
     else:
         video_file = sys.argv[1]
         smpte_only = '--smpte-only' in sys.argv
         subs_only = '--subs-only' in sys.argv
-        force_ndf = '--ndf' in sys.argv
-
-        # Warn if --ndf is used on likely Drop Frame content
-        if force_ndf:
-            drop_frame_rates = [29.97, 59.94]
-            frame_rate_check = get_frame_rate(video_file)
-            if any(abs(frame_rate_check - rate) < 0.01 for rate in drop_frame_rates):
-                print(f"⚠️  Warning: {frame_rate_check:.2f} fps is commonly Drop Frame.")
-                print("You are forcing Non-Drop Frame formatting with '--ndf'.")
-                input("Press Enter to continue or Ctrl+C to abort...")
 
         srt_file = None
         font_size = None
@@ -106,4 +86,4 @@ if __name__ == "__main__":
                 except ValueError:
                     print(f"Warning: Ignoring invalid font size value: {sys.argv[3]}")
 
-        burn_subtitles(video_file, srt_file, font_size, smpte_only, subs_only, force_ndf)
+        burn_subtitles(video_file, srt_file, font_size, smpte_only, subs_only)
