@@ -1,201 +1,179 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 print_usage() {
-    echo "Usage: $0 <video_file> <audio_file>"
-    echo
-    echo "This script adds or replaces audio tracks in a video file."
-    echo "You'll be prompted to choose between adding or replacing the audio."
+    echo "Usage:"
+    echo "  Single pair mode: $0 <video_file> <audio_file>"
+    echo "  Batch mode:       $0 <video_folder> <audio_folder> [output_folder]"
     exit 1
 }
 
-# === Check dependencies ===
-command -v ffmpeg >/dev/null 2>&1 || { echo "❌ ffmpeg is not installed."; exit 1; }
-command -v ffprobe >/dev/null 2>&1 || { echo "❌ ffprobe is not installed."; exit 1; }
+command -v ffmpeg >/dev/null || { echo "❌ ffmpeg not found."; exit 1; }
+command -v ffprobe >/dev/null || { echo "❌ ffprobe not found."; exit 1; }
 
-file_exists() {
-    if [ ! -f "$1" ]; then
-        echo "❌ File not found: $1"
-        exit 1
-    fi
-}
+[[ $# -lt 2 ]] && print_usage
 
-# === Parse arguments ===
-VIDEO="$1"
-AUDIO="$2"
+INPUT1="$1"
+INPUT2="$2"
+OUTPUT_DIR="${3:-$(pwd)}"
 
-[ -z "$VIDEO" ] && print_usage
-[ -z "$AUDIO" ] && print_usage
+is_directory() { [[ -d "$1" ]]; }
+is_file() { [[ -f "$1" ]]; }
+cleanup_temp() { [[ -f "$1" && "$1" != "$2" ]] && rm "$1"; }
 
-file_exists "$VIDEO"
-file_exists "$AUDIO"
+if is_file "$INPUT1" && is_file "$INPUT2"; then
+    MODE="single"
+elif is_directory "$INPUT1" && is_directory "$INPUT2"; then
+    MODE="batch"
+else
+    echo "❌ Invalid input types. Both must be files or both must be folders."
+    print_usage
+fi
 
-BASENAME=$(basename "$VIDEO")
-BASENAME="${BASENAME%.*}"
-
-# === Clean MP4 input if needed ===
-CLEAN_INPUT="$VIDEO"
-EXTENSION="${VIDEO##*.}"
-
-if [[ "$EXTENSION" == "mp4" ]]; then
+prompt_settings() {
     echo
-    echo "🔧 Cleaning MP4 input to remove junk streams and ensure compatibility..."
-    TMP_MKV="${BASENAME}_cleaned_input.mkv"
+    echo "What would you like to do with the audio?"
+    echo "  1) Add as second track"
+    echo "  2) Replace existing [default]"
+    read -p "Enter choice [1–2]: " m
+    m="${m:-2}"
+    [[ "$m" == "1" ]] && MODE_CHOICE="--add" || MODE_CHOICE="--replace"
 
-    ffmpeg -y -i "$VIDEO" \
-        -map 0:v:0 -map 0:a:0 -c copy \
-        "$TMP_MKV"
-
-    CLEAN_INPUT="$TMP_MKV"
-fi
-
-# === Prompt for mode (add or replace) ===
-echo
-echo "What would you like to do with the new audio file?"
-echo "  1) Add it as a second audio track (original audio stays)"
-echo "  2) Replace all existing audio with it [default]"
-read -p "Enter your choice [1–2, default=2]: " MODE_CHOICE
-MODE_CHOICE="${MODE_CHOICE:-2}"
-
-case "$MODE_CHOICE" in
-    1) MODE="--add" ;;
-    2) MODE="--replace" ;;
-    *) echo "❌ Invalid choice. Please enter 1 or 2."; exit 1 ;;
-esac
-
-# === Detect channel count ===
-CHANNELS=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels \
-    -of default=nokey=1:noprint_wrappers=1 "$AUDIO")
-
-if [[ "$CHANNELS" -eq 6 ]]; then
-    CHANNEL_DESC="5.1 surround"
-elif [[ "$CHANNELS" -eq 2 ]]; then
-    CHANNEL_DESC="stereo"
-elif [[ "$CHANNELS" -eq 1 ]]; then
-    CHANNEL_DESC="mono"
-else
-    CHANNEL_DESC="$CHANNELS-channel"
-fi
-
-echo
-echo "[Info] Detected $CHANNEL_DESC audio in input file."
-
-# === Suggest audio format based on channels ===
-echo
-echo "Choose output audio format:"
-if [[ "$CHANNELS" -eq 6 ]]; then
-    echo "  1) EAC-3 (Dolby Digital Plus 5.1) [recommended]"
-    echo "  2) WAV (uncompressed 5.1 PCM)"
-    read -p "Enter your choice [1–2, default=1]: " FORMAT_CHOICE
-    FORMAT_CHOICE="${FORMAT_CHOICE:-1}"
-
-    case "$FORMAT_CHOICE" in
-        1) CODEC="eac3"; EXT="eac3" ;;
-        2) CODEC="pcm_s24le"; EXT="wav" ;;
-        *) echo "❌ Invalid choice."; exit 1 ;;
-    esac
-
-else
-    echo "  1) WAV (uncompressed 24-bit PCM) [default]"
-    echo "  2) AAC (compressed stereo)"
-    echo "  3) EAC-3 (Dolby Digital Plus stereo)"
-    read -p "Enter your choice [1–3, default=1]: " FORMAT_CHOICE
-    FORMAT_CHOICE="${FORMAT_CHOICE:-1}"
-
-    case "$FORMAT_CHOICE" in
+    echo
+    echo "Choose audio codec:"
+    echo "  1) WAV (PCM)"
+    echo "  2) AAC"
+    echo "  3) EAC-3 (DD+) [default]"
+    read -p "Enter codec [1–3]: " c
+    c="${c:-3}"
+    case "$c" in
         1) CODEC="pcm_s24le"; EXT="wav" ;;
         2) CODEC="aac"; EXT="aac" ;;
         3) CODEC="eac3"; EXT="eac3" ;;
-        *) echo "❌ Invalid choice."; exit 1 ;;
+        *) echo "❌ Invalid codec."; exit 1 ;;
     esac
-fi
 
-# === Choose container format ===
-echo
-echo "Choose container format:"
-echo "  1) MP4 (good compatibility — use with AAC only) [default]"
-echo "  2) MKV (preferred for WAV or EAC-3)"
-read -p "Enter your choice [1–2, default=1]: " CONTAINER_CHOICE
-CONTAINER_CHOICE="${CONTAINER_CHOICE:-1}"
-
-case "$CONTAINER_CHOICE" in
-    1) CONTAINER="mp4" ;;
-    2) CONTAINER="mkv" ;;
-    *) echo "❌ Invalid choice. Please enter 1 or 2."; exit 1 ;;
-esac
-
-# Override MP4 if using PCM or EAC-3
-if [[ "$CONTAINER" == "mp4" && ("$CODEC" == "pcm_s24le" || "$CODEC" == "eac3") ]]; then
     echo
-    echo "⚠️  MP4 does not reliably support WAV or EAC-3 audio."
-    echo "👉 Switching to MKV for maximum compatibility."
+    echo "Select container:"
+    echo "  1) MP4 (AAC only)"
+    echo "  2) MKV [default]"
+    read -p "Enter choice [1–2]: " cont
+    cont="${cont:-2}"
     CONTAINER="mkv"
-fi
+    [[ "$cont" == "1" && "$CODEC" == "aac" ]] && CONTAINER="mp4"
+    [[ "$cont" == "1" && "$CODEC" != "aac" ]] && echo "⚠️  Forcing MKV due to codec." && CONTAINER="mkv"
 
-# === Check for chapter markers in audio ===
-MAP_CHAPTERS_FLAG=""
-HAS_MARKERS=$(ffprobe -v error -i "$AUDIO" -show_chapters | grep -q 'CHAPTER' && echo "yes" || echo "no")
-
-if [[ "$HAS_MARKERS" == "yes" ]]; then
     echo
-    echo "⚠️  Markers detected in the audio file (will appear as chapters)."
-    read -p "Strip marker chapters from final video? [Y/n]: " REMOVE_MARKERS
-    REMOVE_MARKERS=${REMOVE_MARKERS:-Y}
-    if [[ "$REMOVE_MARKERS" =~ ^[Yy]$ ]]; then
-        MAP_CHAPTERS_FLAG="-map_chapters -1"
+    read -p "Strip marker chapters from audio? [Y/n]: " STRIP
+    STRIP="${STRIP:-Y}"
+
+    DEFAULT_FLAG=""
+    if [[ "$MODE_CHOICE" == "--add" ]]; then
+        read -p "Set AD as default audio? [y/N]: " D
+        [[ "$D" =~ ^[Yy]$ ]] && DEFAULT_FLAG="-disposition:a:1 default"
     fi
-fi
+}
 
-# === Set default audio track (only applies to --add) ===
-DEFAULT_FLAG=""
-if [[ "$MODE" == "--add" ]]; then
+process_pair() {
+    local VIDEO="$1"
+    local AUDIO="$2"
+    local OUTDIR="$3"
+    local BASENAME=$(basename "${VIDEO%.*}")
+    local EXT="${VIDEO##*.}"
+
+    if [[ "$EXT" == "mp4" ]]; then
+        CLEAN_INPUT="${OUTDIR}/${BASENAME}_cleaned_input.mkv"
+        ffmpeg -y -i "$VIDEO" -map 0 -map -0:s -c copy "$CLEAN_INPUT" || {
+            echo "❌ Failed to clean MP4 input. Aborting."
+            return 1
+        }
+    else
+        CLEAN_INPUT="$VIDEO"
+    fi
+
+    local MAP_CHAPTERS_FLAG=""
+    if [[ "$STRIP" =~ ^[Yy]$ ]]; then
+        HAS_MARKERS=$(ffprobe -v error -i "$AUDIO" -show_chapters | grep -q 'CHAPTER' && echo "yes" || echo "no")
+        [[ "$HAS_MARKERS" == "yes" ]] && MAP_CHAPTERS_FLAG="-map_chapters -1"
+    fi
+
+    CHANNELS=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels \
+      -of default=nokey=1:noprint_wrappers=1 "$AUDIO")
+    [[ -z "$CHANNELS" ]] && CHANNELS=2
+
+    local OUTFILE_SUFFIX="_with_AD"
+    [[ "$MODE_CHOICE" == "--replace" ]] && OUTFILE_SUFFIX="_replaced_audio"
+    local OUTFILE="${OUTDIR}/${BASENAME}${OUTFILE_SUFFIX}.${CONTAINER}"
+
     echo
-    read -p "Set AD narration as the default audio track? [y/N]: " DEFAULT_CHOICE
-    [[ "$DEFAULT_CHOICE" =~ ^[Yy]$ ]] && DEFAULT_FLAG="-disposition:a:1 default"
-fi
+    echo "🎬 $(basename "$VIDEO") ⇄ $(basename "$AUDIO") → $OUTFILE"
 
-# === Output file name ===
-OUTFILE_SUFFIX="_with_AD"
-[[ "$MODE" == "--replace" ]] && OUTFILE_SUFFIX="_replaced_audio"
-OUTFILE="${BASENAME}${OUTFILE_SUFFIX}.${CONTAINER}"
+    if [[ "$MODE_CHOICE" == "--add" ]]; then
+        echo
+        echo "🔎 Available audio streams in original video:"
+        ffprobe -v error -select_streams a \
+            -show_entries stream=index,codec_name,channels,channel_layout:stream_tags=language \
+            -of csv=p=0 "$VIDEO" |
+            awk -F',' '{ printf "  [%s] Codec: %s | Channels: %s | Layout: %s | Lang: %s\n", $1, $2, $3, $4, $5 }'
 
-# === Run FFmpeg ===
-echo
-if [[ "$MODE" == "--add" ]]; then
-    echo ">> Adding AD narration as a second audio track..."
-    ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
-        -map 0:v:0 -map 0:a -map 1:a \
-        $MAP_CHAPTERS_FLAG \
-        -c:v copy -c:a copy -c:a:2 "$CODEC" \
-        -ac:a:2 "$CHANNELS" \
-        $DEFAULT_FLAG \
-        -metadata:s:a:1 title="Original Audio" \
-        -metadata:s:a:2 title="Audio Description - English" \
-        -metadata:s:a:2 language=eng \
-        "$OUTFILE"
+        read -p "Enter the index of the original audio stream to preserve: " ORIGINAL_INDEX
+        [[ -z "$ORIGINAL_INDEX" ]] && ORIGINAL_INDEX=0
 
-elif [[ "$MODE" == "--replace" ]]; then
-    echo ">> Replacing all audio tracks with AD narration..."
-    ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
-        -map 0:v:0 -map 1:a \
-        $MAP_CHAPTERS_FLAG \
-        -c:v copy -c:a "$CODEC" \
-        -ac "$CHANNELS" \
-        -metadata:s:a:0 title="Audio Description - English" \
-        -metadata:s:a:0 language=eng \
-        "$OUTFILE"
+        ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
+            -map 0:v:0 -map 0:a:$ORIGINAL_INDEX -map 1:a:0 \
+            $MAP_CHAPTERS_FLAG \
+            -c:v copy -c:a copy -c:a:1 "$CODEC" \
+            -ac:a:1 "$CHANNELS" \
+            $DEFAULT_FLAG \
+            -metadata:s:a:0 title="Original Audio" \
+            -metadata:s:a:1 title="Audio Description - English" \
+            -metadata:s:a:1 language=eng \
+            "$OUTFILE"
+    else
+        ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
+            -map 0:v:0 -map 1:a \
+            $MAP_CHAPTERS_FLAG \
+            -c:v copy -c:a "$CODEC" \
+            -ac "$CHANNELS" \
+            -metadata:s:a:0 title="Audio Description - English" \
+            -metadata:s:a:0 language=eng \
+            "$OUTFILE"
+    fi
 
-else
-    echo "❌ Invalid mode: $MODE"
-    exit 1
-fi
+    cleanup_temp "$CLEAN_INPUT" "$VIDEO"
+}
 
-# === Cleanup temporary file if used ===
-if [[ "$CLEAN_INPUT" != "$VIDEO" && -f "$CLEAN_INPUT" ]]; then
+if [[ "$MODE" == "single" ]]; then
+    prompt_settings
+    process_pair "$INPUT1" "$INPUT2" "$(dirname "$INPUT1")"
     echo
-    echo "🧹 Cleaning up temporary file: $CLEAN_INPUT"
-    rm "$CLEAN_INPUT"
+    echo "✅ Done."
+    exit 0
 fi
 
+VIDEO_FILES=()
+AUDIO_FILES=()
+while IFS= read -r -d '' file; do VIDEO_FILES+=("$file"); done < <(find "$INPUT1" -type f -print0 | sort -z)
+while IFS= read -r -d '' file; do AUDIO_FILES+=("$file"); done < <(find "$INPUT2" -type f -print0 | sort -z)
+
+NUM_VID=${#VIDEO_FILES[@]}
+NUM_AUD=${#AUDIO_FILES[@]}
+PAIRS=$((NUM_VID<NUM_AUD ? NUM_VID : NUM_AUD))
+
 echo
-echo "✅ Done! Output file created:"
-echo "   $OUTFILE"
+echo "🧾 Pairing:"
+for ((i=0; i<PAIRS; i++)); do
+    echo "  [$(($i+1))] $(basename "${VIDEO_FILES[$i]}") ⇄ $(basename "${AUDIO_FILES[$i]}")"
+done
+
+echo
+read -p "Proceed with these $PAIRS pairs? [Y/n]: " CONFIRM
+[[ "$CONFIRM" =~ ^[Nn]$ ]] && echo "Cancelled." && exit 1
+
+prompt_settings
+
+for ((i=0; i<PAIRS; i++)); do
+    process_pair "${VIDEO_FILES[$i]}" "${AUDIO_FILES[$i]}" "$OUTPUT_DIR"
+done
+
+echo
+echo "✅ Batch complete."
