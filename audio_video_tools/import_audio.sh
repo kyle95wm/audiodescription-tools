@@ -4,6 +4,8 @@ print_usage() {
     echo "Usage:"
     echo "  Single pair mode: $0 <video_file> <audio_file>"
     echo "  Batch mode:       $0 <video_folder> <audio_folder> [output_folder]"
+    echo "Optional flags:"
+    echo "  --no-config | -nc      Ignore any saved config file"
     exit 1
 }
 
@@ -16,14 +18,38 @@ INPUT1="$1"
 INPUT2="$2"
 OUTPUT_DIR="${3:-$(pwd)}"
 
+# === Flag check for --no-config ===
+NO_CONFIG=false
+for arg in "$@"; do
+    [[ "$arg" == "--no-config" || "$arg" == "-nc" ]] && NO_CONFIG=true
+done
+
 is_directory() { [[ -d "$1" ]]; }
 is_file() { [[ -f "$1" ]]; }
 cleanup_temp() { [[ -f "$1" && "$1" != "$2" ]] && rm "$1"; }
 
+# === Load config (unless skipped) ===
+CONFIG_FILE=""
+if [[ "$NO_CONFIG" == false ]]; then
+    if [[ -f "$(dirname "$0")/import_audio.conf" ]]; then
+        CONFIG_FILE="$(dirname "$0")/import_audio.conf"
+    elif [[ -f "$HOME/.config/ad-tools/import_audio.conf" ]]; then
+        CONFIG_FILE="$HOME/.config/ad-tools/import_audio.conf"
+    fi
+
+    if [[ -n "$CONFIG_FILE" ]]; then
+        echo "[🔧] Loading config: $CONFIG_FILE"
+        source "$CONFIG_FILE"
+    fi
+else
+    echo "[⚠️] Config file loading disabled with --no-config"
+fi
+
+# === Detect mode ===
 if is_file "$INPUT1" && is_file "$INPUT2"; then
-    MODE="single"
+    MODE_TYPE="single"
 elif is_directory "$INPUT1" && is_directory "$INPUT2"; then
-    MODE="batch"
+    MODE_TYPE="batch"
 else
     echo "❌ Invalid input types. Both must be files or both must be folders."
     print_usage
@@ -31,45 +57,65 @@ fi
 
 prompt_settings() {
     echo
-    echo "What would you like to do with the audio?"
-    echo "  1) Add as second track"
-    echo "  2) Replace existing [default]"
-    read -p "Enter choice [1–2]: " m
-    m="${m:-2}"
-    [[ "$m" == "1" ]] && MODE_CHOICE="--add" || MODE_CHOICE="--replace"
+    read -p "What would you like to do with the audio? (add/replace) [default=${MODE:-replace}]: " m
+    MODE="${m:-$MODE}"
 
     echo
-    echo "Choose audio codec:"
-    echo "  1) WAV (PCM)"
-    echo "  2) AAC"
-    echo "  3) EAC-3 (DD+) [default]"
-    read -p "Enter codec [1–3]: " c
-    c="${c:-3}"
-    case "$c" in
-        1) CODEC="pcm_s24le"; EXT="wav" ;;
-        2) CODEC="aac"; EXT="aac" ;;
-        3) CODEC="eac3"; EXT="eac3" ;;
+    read -p "Choose audio codec (wav/aac/eac3) [default=${CODEC:-eac3}]: " c
+    CODEC="${c:-$CODEC}"
+
+    case "$CODEC" in
+        wav) EXT="wav" ;;
+        aac) EXT="aac" ;;
+        eac3) EXT="eac3" ;;
         *) echo "❌ Invalid codec."; exit 1 ;;
     esac
 
     echo
-    echo "Select container:"
-    echo "  1) MP4 (AAC only)"
-    echo "  2) MKV [default]"
-    read -p "Enter choice [1–2]: " cont
-    cont="${cont:-2}"
-    CONTAINER="mkv"
-    [[ "$cont" == "1" && "$CODEC" == "aac" ]] && CONTAINER="mp4"
-    [[ "$cont" == "1" && "$CODEC" != "aac" ]] && echo "⚠️  Forcing MKV due to codec." && CONTAINER="mkv"
+    read -p "Select container (mp4/mkv) [default=${CONTAINER:-mkv}]: " cont
+    CONTAINER="${cont:-$CONTAINER}"
+    [[ "$CONTAINER" == "mp4" && "$CODEC" != "aac" ]] && echo "⚠️ Forcing MKV due to codec" && CONTAINER="mkv"
 
     echo
-    read -p "Strip marker chapters from audio? [Y/n]: " STRIP
-    STRIP="${STRIP:-Y}"
+    read -p "Strip marker chapters from audio? (Y/N) [default=${STRIP_MARKERS:-Y}]: " sm
+    STRIP_MARKERS="${sm:-$STRIP_MARKERS}"
 
     DEFAULT_FLAG=""
-    if [[ "$MODE_CHOICE" == "--add" ]]; then
-        read -p "Set AD as default audio? [y/N]: " D
-        [[ "$D" =~ ^[Yy]$ ]] && DEFAULT_FLAG="-disposition:a:1 default"
+    if [[ "$MODE" == "add" ]]; then
+        read -p "Set AD as default audio? (Y/N) [default=${SET_AD_DEFAULT:-N}]: " d
+        SET_AD_DEFAULT="${d:-$SET_AD_DEFAULT}"
+        [[ "$SET_AD_DEFAULT" =~ ^[Yy]$ ]] && DEFAULT_FLAG="-disposition:a:1 default"
+    fi
+
+    # Only prompt to save if no config was loaded
+    if [[ "$NO_CONFIG" == true || -z "$CONFIG_FILE" ]]; then
+        echo
+        read -p "Save these settings to a config file for next time? [y/N]: " saveconf
+        if [[ "$saveconf" =~ ^[Yy]$ ]]; then
+            echo
+            echo "Where do you want to save the config?"
+            echo "  1) Script folder (same as import_audio.sh)"
+            echo "  2) Global (~/.config/ad-tools)"
+            read -p "Enter choice [1–2, default=1]: " confdest
+            confdest="${confdest:-1}"
+
+            if [[ "$confdest" == "2" ]]; then
+                mkdir -p "$HOME/.config/ad-tools"
+                CONFIG_DEST="$HOME/.config/ad-tools/import_audio.conf"
+            else
+                CONFIG_DEST="$(dirname "$0")/import_audio.conf"
+            fi
+
+            cat > "$CONFIG_DEST" <<EOF
+MODE=$MODE
+CODEC=$CODEC
+CONTAINER=$CONTAINER
+STRIP_MARKERS=$STRIP_MARKERS
+SET_AD_DEFAULT=$SET_AD_DEFAULT
+EOF
+
+            echo "✅ Saved to $CONFIG_DEST"
+        fi
     fi
 }
 
@@ -91,7 +137,7 @@ process_pair() {
     fi
 
     local MAP_CHAPTERS_FLAG=""
-    if [[ "$STRIP" =~ ^[Yy]$ ]]; then
+    if [[ "$STRIP_MARKERS" =~ ^[Yy]$ ]]; then
         HAS_MARKERS=$(ffprobe -v error -i "$AUDIO" -show_chapters | grep -q 'CHAPTER' && echo "yes" || echo "no")
         [[ "$HAS_MARKERS" == "yes" ]] && MAP_CHAPTERS_FLAG="-map_chapters -1"
     fi
@@ -101,13 +147,13 @@ process_pair() {
     [[ -z "$CHANNELS" ]] && CHANNELS=2
 
     local OUTFILE_SUFFIX="_with_AD"
-    [[ "$MODE_CHOICE" == "--replace" ]] && OUTFILE_SUFFIX="_replaced_audio"
+    [[ "$MODE" == "replace" ]] && OUTFILE_SUFFIX="_replaced_audio"
     local OUTFILE="${OUTDIR}/${BASENAME}${OUTFILE_SUFFIX}.${CONTAINER}"
 
     echo
     echo "🎬 $(basename "$VIDEO") ⇄ $(basename "$AUDIO") → $OUTFILE"
 
-    if [[ "$MODE_CHOICE" == "--add" ]]; then
+    if [[ "$MODE" == "add" ]]; then
         echo
         echo "🔎 Available audio streams in original video:"
         ffprobe -v error -select_streams a \
@@ -142,7 +188,8 @@ process_pair() {
     cleanup_temp "$CLEAN_INPUT" "$VIDEO"
 }
 
-if [[ "$MODE" == "single" ]]; then
+# === Main run ===
+if [[ "$MODE_TYPE" == "single" ]]; then
     prompt_settings
     process_pair "$INPUT1" "$INPUT2" "$(dirname "$INPUT1")"
     echo
