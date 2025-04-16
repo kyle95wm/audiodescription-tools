@@ -32,13 +32,29 @@ file_exists "$AUDIO"
 BASENAME=$(basename "$VIDEO")
 BASENAME="${BASENAME%.*}"
 
+# === Clean MP4 input if needed ===
+CLEAN_INPUT="$VIDEO"
+EXTENSION="${VIDEO##*.}"
+
+if [[ "$EXTENSION" == "mp4" ]]; then
+    echo
+    echo "🔧 Cleaning MP4 input to remove junk streams and ensure compatibility..."
+    TMP_MKV="${BASENAME}_cleaned_input.mkv"
+
+    ffmpeg -y -i "$VIDEO" \
+        -map 0:v:0 -map 0:a:0 -c copy \
+        "$TMP_MKV"
+
+    CLEAN_INPUT="$TMP_MKV"
+fi
+
 # === Prompt for mode (add or replace) ===
 echo
 echo "What would you like to do with the new audio file?"
 echo "  1) Add it as a second audio track (original audio stays)"
-echo "  2) Replace all existing audio with it"
-read -p "Enter your choice [1–2, default=1]: " MODE_CHOICE
-MODE_CHOICE="${MODE_CHOICE:-1}"
+echo "  2) Replace all existing audio with it [default]"
+read -p "Enter your choice [1–2, default=2]: " MODE_CHOICE
+MODE_CHOICE="${MODE_CHOICE:-2}"
 
 case "$MODE_CHOICE" in
     1) MODE="--add" ;;
@@ -101,7 +117,6 @@ echo "  2) MKV (preferred for WAV or EAC-3)"
 read -p "Enter your choice [1–2, default=1]: " CONTAINER_CHOICE
 CONTAINER_CHOICE="${CONTAINER_CHOICE:-1}"
 
-# Default to user’s selection first
 case "$CONTAINER_CHOICE" in
     1) CONTAINER="mp4" ;;
     2) CONTAINER="mkv" ;;
@@ -114,6 +129,20 @@ if [[ "$CONTAINER" == "mp4" && ("$CODEC" == "pcm_s24le" || "$CODEC" == "eac3") ]
     echo "⚠️  MP4 does not reliably support WAV or EAC-3 audio."
     echo "👉 Switching to MKV for maximum compatibility."
     CONTAINER="mkv"
+fi
+
+# === Check for chapter markers in audio ===
+MAP_CHAPTERS_FLAG=""
+HAS_MARKERS=$(ffprobe -v error -i "$AUDIO" -show_chapters | grep -q 'CHAPTER' && echo "yes" || echo "no")
+
+if [[ "$HAS_MARKERS" == "yes" ]]; then
+    echo
+    echo "⚠️  Markers detected in the audio file (will appear as chapters)."
+    read -p "Strip marker chapters from final video? [Y/n]: " REMOVE_MARKERS
+    REMOVE_MARKERS=${REMOVE_MARKERS:-Y}
+    if [[ "$REMOVE_MARKERS" =~ ^[Yy]$ ]]; then
+        MAP_CHAPTERS_FLAG="-map_chapters -1"
+    fi
 fi
 
 # === Set default audio track (only applies to --add) ===
@@ -133,8 +162,9 @@ OUTFILE="${BASENAME}${OUTFILE_SUFFIX}.${CONTAINER}"
 echo
 if [[ "$MODE" == "--add" ]]; then
     echo ">> Adding AD narration as a second audio track..."
-    ffmpeg -y -i "$VIDEO" -i "$AUDIO" \
-        -map 0:v -map 0:a -map 1:a \
+    ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
+        -map 0:v:0 -map 0:a -map 1:a \
+        $MAP_CHAPTERS_FLAG \
         -c:v copy -c:a copy -c:a:2 "$CODEC" \
         -ac:a:2 "$CHANNELS" \
         $DEFAULT_FLAG \
@@ -145,8 +175,9 @@ if [[ "$MODE" == "--add" ]]; then
 
 elif [[ "$MODE" == "--replace" ]]; then
     echo ">> Replacing all audio tracks with AD narration..."
-    ffmpeg -y -i "$VIDEO" -i "$AUDIO" \
-        -map 0:v -map 1:a \
+    ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
+        -map 0:v:0 -map 1:a \
+        $MAP_CHAPTERS_FLAG \
         -c:v copy -c:a "$CODEC" \
         -ac "$CHANNELS" \
         -metadata:s:a:0 title="Audio Description - English" \
@@ -156,6 +187,13 @@ elif [[ "$MODE" == "--replace" ]]; then
 else
     echo "❌ Invalid mode: $MODE"
     exit 1
+fi
+
+# === Cleanup temporary file if used ===
+if [[ "$CLEAN_INPUT" != "$VIDEO" && -f "$CLEAN_INPUT" ]]; then
+    echo
+    echo "🧹 Cleaning up temporary file: $CLEAN_INPUT"
+    rm "$CLEAN_INPUT"
 fi
 
 echo
