@@ -15,7 +15,7 @@ def get_frame_rate(video_file):
     num, denom = map(int, rate.split('/'))
     return num / denom
 
-def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, subs_only=False):
+def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, subs_only=False, downscale_720=False, force_mp4=False):
     """Burn subtitles and/or SMPTE timecode into the video."""
     if not os.path.isfile(video_file):
         print(f"Error: The video file '{video_file}' does not exist.")
@@ -23,8 +23,11 @@ def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, 
 
     frame_rate = get_frame_rate(video_file)
     video_dir, video_name = os.path.split(video_file)
+    base_name, _ = os.path.splitext(video_name)
+
     output_prefix = "tc_" if smpte_only else "subs_" if subs_only else "burn_"
-    output_file = os.path.join(video_dir, f"{output_prefix}{video_name}")
+    ext = ".mp4" if force_mp4 else os.path.splitext(video_file)[1]
+    output_file = os.path.join(video_dir, f"{output_prefix}{base_name}{ext}")
 
     filters = []
 
@@ -47,8 +50,10 @@ def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, 
             "MarginV=50"
         ]
         subtitles_filter += f":force_style='{','.join(style_parts)}'"
-
         filters.append(subtitles_filter)
+
+    if downscale_720:
+        filters.append("scale=1280:720")
 
     ffmpeg_command = [
         'ffmpeg',
@@ -67,13 +72,15 @@ def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2 or (len(sys.argv) < 3 and '--smpte-only' not in sys.argv and '--subs-only' not in sys.argv):
-        print("Usage: python burn_subtitles.py <video_file> [<srt_file> [font_size]] [--smpte-only | --subs-only]")
+        print("Usage: python burn_subtitles.py <video_file> [<srt_file> [font_size]] [--smpte-only | --subs-only] [--720] [--mp4]")
     elif '--smpte-only' in sys.argv and '--subs-only' in sys.argv:
         print("Error: Cannot use both '--smpte-only' and '--subs-only' at the same time.")
     else:
         video_file = sys.argv[1]
         smpte_only = '--smpte-only' in sys.argv
         subs_only = '--subs-only' in sys.argv
+        downscale_720 = '--720' in sys.argv
+        force_mp4 = '--mp4' in sys.argv
 
         srt_file = None
         font_size = None
@@ -86,4 +93,4 @@ if __name__ == "__main__":
                 except ValueError:
                     print(f"Warning: Ignoring invalid font size value: {sys.argv[3]}")
 
-        burn_subtitles(video_file, srt_file, font_size, smpte_only, subs_only)
+        burn_subtitles(video_file, srt_file, font_size, smpte_only, subs_only, downscale_720, force_mp4)
