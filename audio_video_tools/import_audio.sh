@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
 
 # === Auto-updater (comment out to disable) ===
-UPDATE_URL="https://raw.githubusercontent.com/yourusername/yourrepo/main/import_audio.sh"
+UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/main/audio_video_tools/import_audio.sh"
 SCRIPT_PATH="$(realpath "$0")"
 
 echo "[🔄] Checking for updates..."
 
 LATEST_SCRIPT=$(mktemp)
 if curl -fsSL "$UPDATE_URL" -o "$LATEST_SCRIPT"; then
-    if ! diff -q "$SCRIPT_PATH" "$LATEST_SCRIPT" >/dev/null; then
-        echo "[⬇️] Update available. Applying update..."
-        cp "$LATEST_SCRIPT" "$SCRIPT_PATH"
-        chmod +x "$SCRIPT_PATH"
-        echo "[✅] Script updated! Re-running..."
-        exec "$SCRIPT_PATH" "$@"
+    if grep -q "^#!/usr/bin/env bash" "$LATEST_SCRIPT"; then
+        if ! diff -q "$SCRIPT_PATH" "$LATEST_SCRIPT" >/dev/null; then
+            echo "[⬇️] Update available. Applying update..."
+            cp "$LATEST_SCRIPT" "$SCRIPT_PATH"
+            chmod +x "$SCRIPT_PATH"
+            echo "[✅] Script updated! Re-running..."
+            exec "$SCRIPT_PATH" "$@"
+        else
+            echo "[ℹ️] Already up-to-date."
+        fi
     else
-        echo "[ℹ️] Already up-to-date."
+        echo "[❌] Update check failed: Downloaded file is not a valid script."
     fi
 else
     echo "[⚠️] Could not check for updates. Continuing with existing script."
