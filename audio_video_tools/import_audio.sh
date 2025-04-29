@@ -225,7 +225,7 @@ if [[ "$AUDIO_ONLY" == true ]]; then
     exit 0
 fi
 
-if [[ is_file "$INPUT1" && is_file "$INPUT2" ]]; then
+if is_file "$INPUT1" && is_file "$INPUT2"; then
     MODE_TYPE="single"
 elif [[ is_directory "$INPUT1" && is_directory "$INPUT2" ]]; then
     MODE_TYPE="batch"
