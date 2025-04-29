@@ -2,26 +2,31 @@
 
 print_usage() {
     echo "Usage:"
-    echo "  Single pair mode: $0 <video_file> <audio_file>"
-    echo "  Batch mode:       $0 <video_folder> <audio_folder> [output_folder]"
+    echo "  Single mux: $0 <video_file> <audio_file>"
+    echo "  Batch mux:  $0 <video_folder> <audio_folder> [output_folder]"
+    echo "  Audio only: $0 <audio_file> --audio-only"
+    echo
     echo "Optional flags:"
     echo "  --no-config | -nc      Ignore any saved config file"
+    echo "  --audio-only | -ao     Re-encode only the audio, no muxing to video"
     exit 1
 }
 
 command -v ffmpeg >/dev/null || { echo "❌ ffmpeg not found."; exit 1; }
 command -v ffprobe >/dev/null || { echo "❌ ffprobe not found."; exit 1; }
 
-[[ $# -lt 2 ]] && print_usage
+[[ $# -lt 1 ]] && print_usage
 
 INPUT1="$1"
 INPUT2="$2"
 OUTPUT_DIR="${3:-$(pwd)}"
 
-# === Flag check for --no-config ===
+# === Flag checks ===
 NO_CONFIG=false
+AUDIO_ONLY=false
 for arg in "$@"; do
     [[ "$arg" == "--no-config" || "$arg" == "-nc" ]] && NO_CONFIG=true
+    [[ "$arg" == "--audio-only" || "$arg" == "-ao" ]] && AUDIO_ONLY=true
 done
 
 is_directory() { [[ -d "$1" ]]; }
@@ -45,21 +50,7 @@ else
     echo "[⚠️] Config file loading disabled with --no-config"
 fi
 
-# === Detect mode ===
-if is_file "$INPUT1" && is_file "$INPUT2"; then
-    MODE_TYPE="single"
-elif is_directory "$INPUT1" && is_directory "$INPUT2"; then
-    MODE_TYPE="batch"
-else
-    echo "❌ Invalid input types. Both must be files or both must be folders."
-    print_usage
-fi
-
 prompt_settings() {
-    echo
-    read -p "What would you like to do with the audio? (add/replace) [default=${MODE:-replace}]: " m
-    MODE="${m:-$MODE}"
-
     echo
     read -p "Choose audio codec (wav/aac/eac3) [default=${CODEC:-eac3}]: " c
     CODEC="${c:-$CODEC}"
@@ -72,61 +63,95 @@ prompt_settings() {
     esac
 
     echo
-    read -p "Select container (mp4/mkv) [default=${CONTAINER:-mkv}]: " cont
-    CONTAINER="${cont:-$CONTAINER}"
-    [[ "$CONTAINER" == "mp4" && "$CODEC" != "aac" ]] && echo "⚠️ Forcing MKV due to codec" && CONTAINER="mkv"
-
-    echo
-    read -p "Strip marker chapters from audio? (Y/N) [default=${STRIP_MARKERS:-Y}]: " sm
-    STRIP_MARKERS="${sm:-$STRIP_MARKERS}"
-
-    DEFAULT_FLAG=""
-    if [[ "$MODE" == "add" ]]; then
-        read -p "Set AD as default audio? (Y/N) [default=${SET_AD_DEFAULT:-N}]: " d
-        SET_AD_DEFAULT="${d:-$SET_AD_DEFAULT}"
-        [[ "$SET_AD_DEFAULT" =~ ^[Yy]$ ]] && DEFAULT_FLAG="-disposition:a:1 default"
+    if [[ "$CODEC" == "eac3" ]]; then
+        echo "Recommended bitrates for EAC3: 192k (stereo), 224k, 384k, 448k (5.1)"
+    elif [[ "$CODEC" == "aac" ]]; then
+        echo "Recommended bitrates for AAC: 128k (stereo), 256k (higher quality)"
     fi
 
-    # Only prompt to save if no config was loaded
-    if [[ "$NO_CONFIG" == true || -z "$CONFIG_FILE" ]]; then
-        echo
-        read -p "Save these settings to a config file for next time? [y/N]: " saveconf
-        if [[ "$saveconf" =~ ^[Yy]$ ]]; then
-            echo
-            echo "Where do you want to save the config?"
-            echo "  1) Script folder (same as import_audio.sh)"
-            echo "  2) Global (~/.config/ad-tools)"
-            read -p "Enter choice [1–2, default=1]: " confdest
-            confdest="${confdest:-1}"
+    if [[ "$CODEC" != "wav" ]]; then
+        read -p "Set audio bitrate (e.g., 192k) [leave blank for codec default]: " USER_BITRATE
 
-            if [[ "$confdest" == "2" ]]; then
-                mkdir -p "$HOME/.config/ad-tools"
-                CONFIG_DEST="$HOME/.config/ad-tools/import_audio.conf"
-            else
-                CONFIG_DEST="$(dirname "$0")/import_audio.conf"
+        if [[ -z "$USER_BITRATE" ]]; then
+            if [[ "$CODEC" == "eac3" ]]; then
+                USER_BITRATE="192k"
+                echo "[ℹ️] Defaulting to 192k for EAC3 stereo."
+            elif [[ "$CODEC" == "aac" ]]; then
+                USER_BITRATE="128k"
+                echo "[ℹ️] Defaulting to 128k for AAC stereo."
             fi
+        fi
+    else
+        USER_BITRATE=""
+    fi
 
-            cat > "$CONFIG_DEST" <<EOF
-MODE=$MODE
-CODEC=$CODEC
-CONTAINER=$CONTAINER
-STRIP_MARKERS=$STRIP_MARKERS
-SET_AD_DEFAULT=$SET_AD_DEFAULT
-EOF
+    CHANNELS=""
+    
+    if [[ "$AUDIO_ONLY" == false ]]; then
+        echo
+        read -p "What would you like to do with the audio? (add/replace) [default=${MODE:-replace}]: " m
+        MODE="${m:-$MODE}"
 
-            echo "✅ Saved to $CONFIG_DEST"
+        echo
+        read -p "Select container (mp4/mkv) [default=${CONTAINER:-mkv}]: " cont
+        CONTAINER="${cont:-$CONTAINER}"
+        [[ "$CONTAINER" == "mp4" && "$CODEC" != "aac" ]] && echo "⚠️ Forcing MKV due to codec" && CONTAINER="mkv"
+
+        echo
+        read -p "Strip marker chapters from audio? (Y/N) [default=${STRIP_MARKERS:-Y}]: " sm
+        STRIP_MARKERS="${sm:-$STRIP_MARKERS}"
+
+        DEFAULT_FLAG=""
+        if [[ "$MODE" == "add" ]]; then
+            read -p "Set AD as default audio? (Y/N) [default=${SET_AD_DEFAULT:-N}]: " d
+            SET_AD_DEFAULT="${d:-$SET_AD_DEFAULT}"
+            [[ "$SET_AD_DEFAULT" =~ ^[Yy]$ ]] && DEFAULT_FLAG="-disposition:a:1 default"
         fi
     fi
+}
+
+process_audio_only() {
+    local AUDIO="$1"
+    local OUTDIR="$2"
+    local BASENAME
+    BASENAME=$(basename "${AUDIO%.*}")
+    local OUTFILE="${OUTDIR}/${BASENAME}_reencoded.${EXT}"
+
+    echo
+    echo "🎧 Re-encoding $(basename "$AUDIO") → $OUTFILE"
+
+    CHANNELS=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels \
+        -of default=nokey=1:noprint_wrappers=1 "$AUDIO")
+    [[ -z "$CHANNELS" ]] && CHANNELS=2
+
+    if [[ "$CODEC" == "wav" ]]; then
+        ffmpeg -y -i "$AUDIO" \
+            -c:a "$CODEC" \
+            -ac "$CHANNELS" \
+            "$OUTFILE"
+    else
+        ffmpeg -y -i "$AUDIO" \
+            -c:a "$CODEC" \
+            -b:a "$USER_BITRATE" \
+            -ac "$CHANNELS" \
+            "$OUTFILE"
+    fi
+
+    echo
+    echo "📋 Copy-paste this command to mux the audio with your video:"
+    echo "ffmpeg -i \"your_video.mp4\" -i \"$(basename "$OUTFILE")\" -map 0:v -map 1:a -c:v copy -c:a copy \"your_new_video.mkv\""
 }
 
 process_pair() {
     local VIDEO="$1"
     local AUDIO="$2"
     local OUTDIR="$3"
-    local BASENAME=$(basename "${VIDEO%.*}")
-    local EXT="${VIDEO##*.}"
+    local BASENAME
+    BASENAME=$(basename "${VIDEO%.*}")
+    local EXTENSION
+    EXTENSION="${VIDEO##*.}"
 
-    if [[ "$EXT" == "mp4" ]]; then
+    if [[ "$EXTENSION" == "mp4" ]]; then
         CLEAN_INPUT="${OUTDIR}/${BASENAME}_cleaned_input.mkv"
         ffmpeg -y -i "$VIDEO" -map 0 -map -0:s -c copy "$CLEAN_INPUT" || {
             echo "❌ Failed to clean MP4 input. Aborting."
@@ -164,36 +189,79 @@ process_pair() {
         read -p "Enter the index of the original audio stream to preserve: " ORIGINAL_INDEX
         [[ -z "$ORIGINAL_INDEX" ]] && ORIGINAL_INDEX=0
 
-        ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
-            -map 0:v:0 -map 0:a:$ORIGINAL_INDEX -map 1:a:0 \
-            $MAP_CHAPTERS_FLAG \
-            -c:v copy -c:a copy -c:a:1 "$CODEC" \
-            -ac:a:1 "$CHANNELS" \
-            $DEFAULT_FLAG \
-            -metadata:s:a:0 title="Original Audio" \
-            -metadata:s:a:1 title="Audio Description - English" \
-            -metadata:s:a:1 language=eng \
-            "$OUTFILE"
+        if [[ "$CODEC" == "wav" ]]; then
+            ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
+                -map 0:v:0 -map 0:a:$ORIGINAL_INDEX -map 1:a:0 \
+                $MAP_CHAPTERS_FLAG \
+                -c:v copy -c:a copy -c:a:1 "$CODEC" \
+                -ac:a:1 "$CHANNELS" \
+                $DEFAULT_FLAG \
+                -metadata:s:a:0 title="Original Audio" \
+                -metadata:s:a:1 title="Audio Description - English" \
+                -metadata:s:a:1 language=eng \
+                "$OUTFILE"
+        else
+            ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
+                -map 0:v:0 -map 0:a:$ORIGINAL_INDEX -map 1:a:0 \
+                $MAP_CHAPTERS_FLAG \
+                -c:v copy -c:a copy -c:a:1 "$CODEC" -b:a:1 "$USER_BITRATE" \
+                -ac:a:1 "$CHANNELS" \
+                $DEFAULT_FLAG \
+                -metadata:s:a:0 title="Original Audio" \
+                -metadata:s:a:1 title="Audio Description - English" \
+                -metadata:s:a:1 language=eng \
+                "$OUTFILE"
+        fi
     else
-        ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
-            -map 0:v:0 -map 1:a \
-            $MAP_CHAPTERS_FLAG \
-            -c:v copy -c:a "$CODEC" \
-            -ac "$CHANNELS" \
-            -metadata:s:a:0 title="Audio Description - English" \
-            -metadata:s:a:0 language=eng \
-            "$OUTFILE"
+        if [[ "$CODEC" == "wav" ]]; then
+            ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
+                -map 0:v:0 -map 1:a \
+                $MAP_CHAPTERS_FLAG \
+                -c:v copy -c:a "$CODEC" \
+                -ac "$CHANNELS" \
+                -metadata:s:a:0 title="Audio Description - English" \
+                -metadata:s:a:0 language=eng \
+                "$OUTFILE"
+        else
+            ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
+                -map 0:v:0 -map 1:a \
+                $MAP_CHAPTERS_FLAG \
+                -c:v copy -c:a "$CODEC" -b:a "$USER_BITRATE" \
+                -ac "$CHANNELS" \
+                -metadata:s:a:0 title="Audio Description - English" \
+                -metadata:s:a:0 language=eng \
+                "$OUTFILE"
+        fi
     fi
 
     cleanup_temp "$CLEAN_INPUT" "$VIDEO"
 }
 
 # === Main run ===
+if [[ "$AUDIO_ONLY" == true ]]; then
+    is_file "$INPUT1" || { echo "❌ You must provide an audio file."; exit 1; }
+    prompt_settings
+    process_audio_only "$INPUT1" "$(dirname "$INPUT1")"
+    echo
+    echo "✅ Audio-only re-encode complete."
+    exit 0
+fi
+
+# Normal muxing mode
+if [[ is_file "$INPUT1" && is_file "$INPUT2" ]]; then
+    MODE_TYPE="single"
+elif [[ is_directory "$INPUT1" && is_directory "$INPUT2" ]]; then
+    MODE_TYPE="batch"
+else
+    echo "❌ Invalid input types."
+    print_usage
+fi
+
 if [[ "$MODE_TYPE" == "single" ]]; then
     prompt_settings
     process_pair "$INPUT1" "$INPUT2" "$(dirname "$INPUT1")"
     echo
-    echo "✅ Done."
+    echo "✅ Single mux complete."
     exit 0
 fi
 
