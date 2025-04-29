@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # === Auto-updater (comment out to disable) ===
-UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/main/audio_video_tools/import_audio.sh"
+UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/main/audio_video_tools/import_audio.sh?$(date +%s)"
 SCRIPT_PATH="$(realpath "$0")"
 
 echo "[🔄] Checking for updates..."
