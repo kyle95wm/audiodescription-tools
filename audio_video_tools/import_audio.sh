@@ -1,5 +1,28 @@
 #!/usr/bin/env bash
 
+# === Auto-updater (comment out to disable) ===
+UPDATE_URL="https://raw.githubusercontent.com/yourusername/yourrepo/main/import_audio.sh"
+SCRIPT_PATH="$(realpath "$0")"
+
+echo "[🔄] Checking for updates..."
+
+LATEST_SCRIPT=$(mktemp)
+if curl -fsSL "$UPDATE_URL" -o "$LATEST_SCRIPT"; then
+    if ! diff -q "$SCRIPT_PATH" "$LATEST_SCRIPT" >/dev/null; then
+        echo "[⬇️] Update available. Applying update..."
+        cp "$LATEST_SCRIPT" "$SCRIPT_PATH"
+        chmod +x "$SCRIPT_PATH"
+        echo "[✅] Script updated! Re-running..."
+        exec "$SCRIPT_PATH" "$@"
+    else
+        echo "[ℹ️] Already up-to-date."
+    fi
+else
+    echo "[⚠️] Could not check for updates. Continuing with existing script."
+fi
+rm -f "$LATEST_SCRIPT"
+# === End auto-updater ===
+
 print_usage() {
     echo "Usage:"
     echo "  Single mux: $0 <video_file> <audio_file>"
@@ -7,8 +30,8 @@ print_usage() {
     echo "  Audio only: $0 <audio_file> --audio-only"
     echo
     echo "Optional flags:"
-    echo "  --no-config | -nc      Ignore any saved config file"
-    echo "  --audio-only | -ao     Re-encode only the audio, no muxing to video"
+    echo "  --no-config | -nc      Ignore saved config file"
+    echo "  --audio-only | -ao     Re-encode only the audio"
     exit 1
 }
 
@@ -21,7 +44,6 @@ INPUT1="$1"
 INPUT2="$2"
 OUTPUT_DIR="${3:-$(pwd)}"
 
-# === Flag checks ===
 NO_CONFIG=false
 AUDIO_ONLY=false
 for arg in "$@"; do
@@ -33,7 +55,6 @@ is_directory() { [[ -d "$1" ]]; }
 is_file() { [[ -f "$1" ]]; }
 cleanup_temp() { [[ -f "$1" && "$1" != "$2" ]] && rm "$1"; }
 
-# === Load config (unless skipped) ===
 CONFIG_FILE=""
 if [[ "$NO_CONFIG" == false ]]; then
     if [[ -f "$(dirname "$0")/import_audio.conf" ]]; then
@@ -47,7 +68,7 @@ if [[ "$NO_CONFIG" == false ]]; then
         source "$CONFIG_FILE"
     fi
 else
-    echo "[⚠️] Config file loading disabled with --no-config"
+    echo "[⚠️] Config file loading disabled."
 fi
 
 prompt_settings() {
@@ -64,29 +85,17 @@ prompt_settings() {
 
     echo
     if [[ "$CODEC" == "eac3" ]]; then
-        echo "Recommended bitrates for EAC3: 192k (stereo), 224k, 384k, 448k (5.1)"
+        echo "Recommended bitrates: 224k (stereo), 640k (5.1 surround)"
     elif [[ "$CODEC" == "aac" ]]; then
-        echo "Recommended bitrates for AAC: 128k (stereo), 256k (higher quality)"
+        echo "Recommended bitrates: 128k (stereo), 384k (5.1 surround)"
     fi
 
     if [[ "$CODEC" != "wav" ]]; then
-        read -p "Set audio bitrate (e.g., 192k) [leave blank for codec default]: " USER_BITRATE
-
-        if [[ -z "$USER_BITRATE" ]]; then
-            if [[ "$CODEC" == "eac3" ]]; then
-                USER_BITRATE="192k"
-                echo "[ℹ️] Defaulting to 192k for EAC3 stereo."
-            elif [[ "$CODEC" == "aac" ]]; then
-                USER_BITRATE="128k"
-                echo "[ℹ️] Defaulting to 128k for AAC stereo."
-            fi
-        fi
+        read -p "Set audio bitrate (e.g., 224k) [leave blank for smart default]: " USER_BITRATE
     else
         USER_BITRATE=""
     fi
 
-    CHANNELS=""
-    
     if [[ "$AUDIO_ONLY" == false ]]; then
         echo
         read -p "What would you like to do with the audio? (add/replace) [default=${MODE:-replace}]: " m
@@ -124,17 +133,23 @@ process_audio_only() {
         -of default=nokey=1:noprint_wrappers=1 "$AUDIO")
     [[ -z "$CHANNELS" ]] && CHANNELS=2
 
+    if [[ -z "$USER_BITRATE" && "$CODEC" != "wav" ]]; then
+        if [[ "$CHANNELS" == "2" ]]; then
+            USER_BITRATE="224k"
+            echo "[ℹ️] Defaulting to 224k for EAC3 stereo."
+        elif [[ "$CHANNELS" -ge 6 ]]; then
+            USER_BITRATE="640k"
+            echo "[ℹ️] Defaulting to 640k for EAC3 5.1+ surround."
+        else
+            USER_BITRATE="224k"
+            echo "[ℹ️] Defaulting to 224k fallback."
+        fi
+    fi
+
     if [[ "$CODEC" == "wav" ]]; then
-        ffmpeg -y -i "$AUDIO" \
-            -c:a "$CODEC" \
-            -ac "$CHANNELS" \
-            "$OUTFILE"
+        ffmpeg -y -i "$AUDIO" -c:a "$CODEC" -ac "$CHANNELS" "$OUTFILE"
     else
-        ffmpeg -y -i "$AUDIO" \
-            -c:a "$CODEC" \
-            -b:a "$USER_BITRATE" \
-            -ac "$CHANNELS" \
-            "$OUTFILE"
+        ffmpeg -y -i "$AUDIO" -c:a "$CODEC" -b:a "$USER_BITRATE" -ac "$CHANNELS" "$OUTFILE"
     fi
 
     echo
@@ -148,8 +163,7 @@ process_pair() {
     local OUTDIR="$3"
     local BASENAME
     BASENAME=$(basename "${VIDEO%.*}")
-    local EXTENSION
-    EXTENSION="${VIDEO##*.}"
+    local EXTENSION="${VIDEO##*.}"
 
     if [[ "$EXTENSION" == "mp4" ]]; then
         CLEAN_INPUT="${OUTDIR}/${BASENAME}_cleaned_input.mkv"
@@ -161,15 +175,19 @@ process_pair() {
         CLEAN_INPUT="$VIDEO"
     fi
 
-    local MAP_CHAPTERS_FLAG=""
-    if [[ "$STRIP_MARKERS" =~ ^[Yy]$ ]]; then
-        HAS_MARKERS=$(ffprobe -v error -i "$AUDIO" -show_chapters | grep -q 'CHAPTER' && echo "yes" || echo "no")
-        [[ "$HAS_MARKERS" == "yes" ]] && MAP_CHAPTERS_FLAG="-map_chapters -1"
-    fi
-
     CHANNELS=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels \
-      -of default=nokey=1:noprint_wrappers=1 "$AUDIO")
+        -of default=nokey=1:noprint_wrappers=1 "$AUDIO")
     [[ -z "$CHANNELS" ]] && CHANNELS=2
+
+    if [[ -z "$USER_BITRATE" && "$CODEC" != "wav" ]]; then
+        if [[ "$CHANNELS" == "2" ]]; then
+            USER_BITRATE="224k"
+        elif [[ "$CHANNELS" -ge 6 ]]; then
+            USER_BITRATE="640k"
+        else
+            USER_BITRATE="224k"
+        fi
+    fi
 
     local OUTFILE_SUFFIX="_with_AD"
     [[ "$MODE" == "replace" ]] && OUTFILE_SUFFIX="_replaced_audio"
@@ -179,65 +197,21 @@ process_pair() {
     echo "🎬 $(basename "$VIDEO") ⇄ $(basename "$AUDIO") → $OUTFILE"
 
     if [[ "$MODE" == "add" ]]; then
-        echo
-        echo "🔎 Available audio streams in original video:"
-        ffprobe -v error -select_streams a \
-            -show_entries stream=index,codec_name,channels,channel_layout:stream_tags=language \
-            -of csv=p=0 "$VIDEO" |
-            awk -F',' '{ printf "  [%s] Codec: %s | Channels: %s | Layout: %s | Lang: %s\n", $1, $2, $3, $4, $5 }'
-
-        read -p "Enter the index of the original audio stream to preserve: " ORIGINAL_INDEX
-        [[ -z "$ORIGINAL_INDEX" ]] && ORIGINAL_INDEX=0
-
-        if [[ "$CODEC" == "wav" ]]; then
-            ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
-                -map 0:v:0 -map 0:a:$ORIGINAL_INDEX -map 1:a:0 \
-                $MAP_CHAPTERS_FLAG \
-                -c:v copy -c:a copy -c:a:1 "$CODEC" \
-                -ac:a:1 "$CHANNELS" \
-                $DEFAULT_FLAG \
-                -metadata:s:a:0 title="Original Audio" \
-                -metadata:s:a:1 title="Audio Description - English" \
-                -metadata:s:a:1 language=eng \
-                "$OUTFILE"
-        else
-            ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
-                -map 0:v:0 -map 0:a:$ORIGINAL_INDEX -map 1:a:0 \
-                $MAP_CHAPTERS_FLAG \
-                -c:v copy -c:a copy -c:a:1 "$CODEC" -b:a:1 "$USER_BITRATE" \
-                -ac:a:1 "$CHANNELS" \
-                $DEFAULT_FLAG \
-                -metadata:s:a:0 title="Original Audio" \
-                -metadata:s:a:1 title="Audio Description - English" \
-                -metadata:s:a:1 language=eng \
-                "$OUTFILE"
-        fi
+        ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
+            -map 0:v:0 -map 0:a:0 -map 1:a:0 \
+            -c:v copy -c:a copy -c:a:1 "$CODEC" -b:a:1 "$USER_BITRATE" \
+            "$OUTFILE"
     else
-        if [[ "$CODEC" == "wav" ]]; then
-            ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
-                -map 0:v:0 -map 1:a \
-                $MAP_CHAPTERS_FLAG \
-                -c:v copy -c:a "$CODEC" \
-                -ac "$CHANNELS" \
-                -metadata:s:a:0 title="Audio Description - English" \
-                -metadata:s:a:0 language=eng \
-                "$OUTFILE"
-        else
-            ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
-                -map 0:v:0 -map 1:a \
-                $MAP_CHAPTERS_FLAG \
-                -c:v copy -c:a "$CODEC" -b:a "$USER_BITRATE" \
-                -ac "$CHANNELS" \
-                -metadata:s:a:0 title="Audio Description - English" \
-                -metadata:s:a:0 language=eng \
-                "$OUTFILE"
-        fi
+        ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
+            -map 0:v:0 -map 1:a:0 \
+            -c:v copy -c:a "$CODEC" -b:a "$USER_BITRATE" \
+            "$OUTFILE"
     fi
 
     cleanup_temp "$CLEAN_INPUT" "$VIDEO"
 }
 
-# === Main run ===
+# === Main Run ===
 if [[ "$AUDIO_ONLY" == true ]]; then
     is_file "$INPUT1" || { echo "❌ You must provide an audio file."; exit 1; }
     prompt_settings
@@ -247,7 +221,6 @@ if [[ "$AUDIO_ONLY" == true ]]; then
     exit 0
 fi
 
-# Normal muxing mode
 if [[ is_file "$INPUT1" && is_file "$INPUT2" ]]; then
     MODE_TYPE="single"
 elif [[ is_directory "$INPUT1" && is_directory "$INPUT2" ]]; then
