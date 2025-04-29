@@ -227,7 +227,7 @@ fi
 
 if is_file "$INPUT1" && is_file "$INPUT2"; then
     MODE_TYPE="single"
-elif [[ is_directory "$INPUT1" && is_directory "$INPUT2" ]]; then
+elif is_directory "$INPUT1" && is_directory "$INPUT2"; then
     MODE_TYPE="batch"
 else
     echo "❌ Invalid input types."
