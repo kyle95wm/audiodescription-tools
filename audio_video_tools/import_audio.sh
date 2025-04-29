@@ -58,7 +58,6 @@ done
 is_directory() { [[ -d "$1" ]]; }
 is_file() { [[ -f "$1" ]]; }
 cleanup_temp() { [[ -f "$1" && "$1" != "$2" ]] && rm "$1"; }
-
 CONFIG_FILE=""
 if [[ "$NO_CONFIG" == false ]]; then
     if [[ -f "$(dirname "$0")/import_audio.conf" ]]; then
@@ -147,7 +146,6 @@ process_audio_only() {
     echo
     echo "📋 To mux: ffmpeg -i your_video.mkv -i $(basename "$OUTFILE") -map 0:v -map 1:a -c:v copy -c:a copy output.mkv"
 }
-
 process_pair() {
     local VIDEO="$1"
     shift
@@ -218,7 +216,11 @@ process_pair() {
     fi
 
     for ((i=0; i<${#AUDIO_FILES[@]}; i++)); do
-        local index=$((i + (MODE == "add" ? EXISTING_AUDIO_COUNT : 0)))
+        if [[ "$MODE" == "add" ]]; then
+            index=$((i + EXISTING_AUDIO_COUNT))
+        else
+            index=$i
+        fi
         CMD+=(-c:a:$index "$CODEC")
         [[ "$CODEC" != "wav" ]] && CMD+=(-b:a:$index "$USER_BITRATE")
         CMD+=(-metadata:s:a:$index title="${TITLES[$i]}")
@@ -235,7 +237,6 @@ process_pair() {
     echo
     "${CMD[@]}"
 }
-
 # === Main Logic ===
 
 if [[ "$AUDIO_ONLY" == true ]]; then
@@ -264,7 +265,7 @@ if [[ "$MODE_TYPE" == "single" ]]; then
     exit 0
 fi
 
-# Batch mode
+# === Batch Mode ===
 VIDEO_FILES=()
 AUDIO_FILES=()
 while IFS= read -r -d '' file; do VIDEO_FILES+=("$file"); done < <(find "$INPUT1" -type f -print0 | sort -z)
