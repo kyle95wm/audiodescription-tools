@@ -5,6 +5,3 @@ This repository contains a collection of scripts designed to convert subtitle an
 
 ## Contributing
 Contributions are welcome! Please fork this repository and submit pull requests.
-
-## License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
