@@ -47,7 +47,7 @@ def add_region_markers(srt_path, output_path, sample_rate=48000, bit_depth=24, n
     frames = create_blank_audio(last_end_time, sample_rate, bit_depth, nchannels)
 
     if len(frames) % 2 != 0:
-        frames += b'\x00'  # pad to even number of bytes
+        frames += b'\x00'  # pad to even byte count
 
     cue_data = struct.pack('<I', len(regions))
     labl_chunks = b''
@@ -64,8 +64,7 @@ def add_region_markers(srt_path, output_path, sample_rate=48000, bit_depth=24, n
         cue_data += struct.pack('<III', 0, 0, start_sample)
 
         label = name.encode('utf-8') + b'\x00'
-        label_size = len(label)
-        if label_size % 2 != 0:
+        if len(label) % 2 != 0:
             label += b'\x00'
         labl_chunks += struct.pack('<4sI', b'labl', len(label) + 4)
         labl_chunks += struct.pack('<I', idx) + label
@@ -80,17 +79,17 @@ def add_region_markers(srt_path, output_path, sample_rate=48000, bit_depth=24, n
     adtl_data = labl_chunks + ltxt_chunks
     list_chunk = b'LIST' + struct.pack('<I', len(adtl_data) + 4) + b'adtl' + adtl_data
 
-    total_size = (
-        4 +  # "WAVE"
-        (8 + 16) +  # fmt chunk
-        (8 + len(frames)) +  # data chunk
-        (8 + len(cue_chunk)) +  # cue chunk
-        (8 + len(list_chunk))  # list chunk
+    # Correct RIFF size: total size of all chunks minus the 8 bytes of 'RIFF' header
+    riff_size = (
+        (8 + 16) +               # fmt
+        (8 + len(frames)) +      # data
+        (8 + len(cue_chunk)) +   # cue
+        (8 + len(list_chunk))    # LIST
     )
 
     with open(output_path, 'wb') as out_file:
         out_file.write(b'RIFF')
-        out_file.write(struct.pack('<I', total_size))
+        out_file.write(struct.pack('<I', riff_size))
         out_file.write(b'WAVE')
 
         # fmt chunk
