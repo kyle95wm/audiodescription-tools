@@ -5,7 +5,6 @@ import sys
 import subprocess
 
 def get_frame_rate(video_file):
-    # Use ffprobe to extract the video’s frame rate for SMPTE timecode accuracy
     result = subprocess.run(
         ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
          '-show_entries', 'stream=r_frame_rate',
@@ -16,62 +15,41 @@ def get_frame_rate(video_file):
     num, denom = map(int, rate.split('/'))
     return num / denom
 
-def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, subs_only=False, downscale_720=False, force_mp4=False):
-    if not os.path.isfile(video_file):
-        print(f"Error: The video file '{video_file}' does not exist.")
-        return
-
+def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, subs_only=False, downscale_720=False):
     frame_rate = get_frame_rate(video_file)
-    video_dir, video_name = os.path.split(video_file)
-    base_name, _ = os.path.splitext(video_name)
+    base_name, _ = os.path.splitext(os.path.basename(video_file))
 
-    # Set output filename prefix based on mode:
-    # "tc_" = timecode only, "subs_" = subtitles only, "burn_" = both timecode and subs
     output_prefix = "tc_" if smpte_only else "subs_" if subs_only else "burn_"
-    ext = ".mp4" if force_mp4 else os.path.splitext(video_file)[1]
-    output_file = os.path.join(video_dir, f"{output_prefix}{base_name}{ext}")
+    output_file = os.path.join("output", f"{output_prefix}{base_name}.mp4")
 
     filters = []
 
     if downscale_720:
-        # Important: scale first before adding subtitles to keep them sharp.
-        # If subtitles are added before scaling, they’ll be rendered at full res and then downscaled,
-        # which can make the text appear blurry—especially noticeable for sighted users.
         filters.append("scale=1280:720")
 
     if not subs_only:
-        # SMPTE timecode overlay in top-left corner using drawtext.
-        # Font, size, and box color can be customized here.
-        # Note: drawtext does not use libass styling—it's controlled manually.
         filters.append(
             f"drawtext=fontfile=/Library/Fonts/DroidSansMono.ttf:timecode='00\\:00\\:00\\:00':rate={frame_rate}:fontsize=30:"
             "fontcolor=white:x=10:y=10:box=1:boxcolor=0x000000AA"
         )
 
-    if not smpte_only:
-        if not os.path.isfile(srt_file):
-            print(f"Error: The subtitle file '{srt_file}' does not exist.")
-            return
-
-        # Subtitle style customization using libass "force_style" overrides
-        # These ensure consistent appearance across systems, regardless of default settings
+    if not smpte_only and srt_file and os.path.isfile(srt_file):
         style_parts = [
-            f"FontSize={font_size if font_size else 20}",          # Text size in points
-            "PrimaryColour=&H00FFFFFF&",                           # White text
-            "SecondaryColour=&H00FF0000&",                         # (Not used unless karaoke)
-            "OutlineColour=&H00000000&",                           # Black outline
-            "BackColour=&H80000000&",                              # Semi-transparent black background box
-            "Outline=2",                                           # Outline thickness
-            "Shadow=3",                                            # Drop shadow depth
-            "MarginV=50",                                          # Vertical margin (bottom padding)
-            "MarginL=12",                                          # Left padding
-            "MarginR=12"                                           # Right padding
+            f"FontSize={font_size if font_size else 20}",
+            "PrimaryColour=&H00FFFFFF&",
+            "SecondaryColour=&H00FF0000&",
+            "OutlineColour=&H00000000&",
+            "BackColour=&H80000000&",
+            "Outline=2",
+            "Shadow=3",
+            "MarginV=50",
+            "MarginL=12",
+            "MarginR=12"
         ]
-        subtitles_filter = f"subtitles={srt_file}:force_style='{','.join(style_parts)}'"
-        filters.append(subtitles_filter)
+        filters.append(f"subtitles={srt_file}:force_style='{','.join(style_parts)}'")
 
     ffmpeg_command = [
-        'ffmpeg',
+        'ffmpeg', '-y',
         '-i', video_file,
         '-vf', ",".join(filters),
         '-c:a', 'copy',
@@ -80,32 +58,58 @@ def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, 
 
     try:
         subprocess.run(ffmpeg_command, check=True)
-        print(f"Subtitles and SMPTE timecode burned into video successfully. Output file: '{output_file}'")
+        print(f"✔ Done: {output_file}")
     except subprocess.CalledProcessError as e:
-        print(f"Error: FFmpeg failed with exit code {e.returncode}")
-        print(e.output)
+        print(f"✖ FFmpeg failed on {video_file} (exit code {e.returncode})")
+
+def batch_process(font_size=None, smpte_only=False, subs_only=False, downscale_720=False):
+    os.makedirs("output", exist_ok=True)
+    video_exts = ['.mp4', '.mkv', '.mov']
+    for file in os.listdir():
+        if not os.path.isfile(file):
+            continue
+
+        base, ext = os.path.splitext(file)
+        if ext.lower() not in video_exts:
+            continue
+
+        srt_file = f"{base}.srt"
+        if not smpte_only and not os.path.isfile(srt_file):
+            print(f"Skipping {file} (no matching SRT found)")
+            continue
+
+        burn_subtitles(file, srt_file, font_size, smpte_only, subs_only, downscale_720)
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2 or (len(sys.argv) < 3 and '--smpte-only' not in sys.argv and '--subs-only' not in sys.argv):
-        print("Usage: python burn_subtitles.py <video_file> [<srt_file> [font_size]] [--smpte-only | --subs-only] [--720] [--mp4]")
-    elif '--smpte-only' in sys.argv and '--subs-only' in sys.argv:
-        print("Error: Cannot use both '--smpte-only' and '--subs-only' at the same time.")
+    args = sys.argv[1:]
+
+    smpte_only = '--smpte-only' in args
+    subs_only = '--subs-only' in args
+    downscale_720 = '--720' in args
+    batch_mode = '--batch' in args
+
+    if smpte_only and subs_only:
+        print("Error: Cannot use both '--smpte-only' and '--subs-only' together.")
+        sys.exit(1)
+
+    font_size = None
+    positional = [arg for arg in args if not arg.startswith('--') and not arg.isdigit()]
+    font_args = [arg for arg in args if arg.isdigit()]
+    if font_args:
+        font_size = int(font_args[0])
+
+    os.makedirs("output", exist_ok=True)
+
+    if batch_mode:
+        batch_process(font_size, smpte_only, subs_only, downscale_720)
+    elif len(positional) >= 1:
+        video_file = positional[0]
+        srt_file = positional[1] if len(positional) > 1 else None
+        if not smpte_only and not srt_file:
+            print("Error: Subtitle file required unless using --smpte-only")
+            sys.exit(1)
+        burn_subtitles(video_file, srt_file, font_size, smpte_only, subs_only, downscale_720)
     else:
-        video_file = sys.argv[1]
-        smpte_only = '--smpte-only' in sys.argv
-        subs_only = '--subs-only' in sys.argv
-        downscale_720 = '--720' in sys.argv
-        force_mp4 = '--mp4' in sys.argv
-
-        srt_file = None
-        font_size = None
-
-        if not smpte_only:
-            srt_file = sys.argv[2]
-            if len(sys.argv) >= 4 and not sys.argv[3].startswith('--'):
-                try:
-                    font_size = int(sys.argv[3])
-                except ValueError:
-                    print(f"Warning: Ignoring invalid font size value: {sys.argv[3]}")
-
-        burn_subtitles(video_file, srt_file, font_size, smpte_only, subs_only, downscale_720, force_mp4)
+        print("Usage:")
+        print("  python burn_subtitles.py <video_file> <srt_file> [font_size] [--smpte-only | --subs-only] [--720]")
+        print("  python burn_subtitles.py --batch [font_size] [--smpte-only | --subs-only] [--720]")
