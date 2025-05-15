@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 
 # === Auto-updater ===
+# This section checks for the latest version of this script and updates it automatically if needed.
 UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/main/audio_video_tools/import_audio.sh?$(date +%s)"
 SCRIPT_PATH="$(realpath "$0")"
 
 echo "[🔄] Checking for updates..."
 
-LATEST_SCRIPT=$(mktemp)
+LATEST_SCRIPT=$(mktemp) || { echo "❌ Failed to create temp file."; exit 1; }
 if curl -fsSL "$UPDATE_URL" -o "$LATEST_SCRIPT"; then
     if grep -q "^#!/usr/bin/env bash" "$LATEST_SCRIPT"; then
         if ! diff -q "$SCRIPT_PATH" "$LATEST_SCRIPT" >/dev/null; then
@@ -25,9 +26,8 @@ else
     echo "[⚠️] Could not check for updates. Continuing with existing script."
 fi
 rm -f "$LATEST_SCRIPT"
-# === End auto-updater ===
 
-# -- Initialization --
+# Display usage/help text for the script
 print_usage() {
     echo "Usage:"
     echo "  Single mux: $0 <video_file> <audio_file>"
@@ -40,6 +40,7 @@ print_usage() {
     exit 1
 }
 
+# Ensure ffmpeg and ffprobe are installed
 command -v ffmpeg >/dev/null || { echo "❌ ffmpeg not found."; exit 1; }
 command -v ffprobe >/dev/null || { echo "❌ ffprobe not found."; exit 1; }
 
@@ -56,10 +57,20 @@ for arg in "$@"; do
     [[ "$arg" == "--audio-only" || "$arg" == "-ao" ]] && AUDIO_ONLY=true
 done
 
+# Basic helpers
 is_directory() { [[ -d "$1" ]]; }
 is_file() { [[ -f "$1" ]]; }
-cleanup_temp() { [[ -f "$1" && "$1" != "$2" ]] && rm "$1"; }
 
+# Clean up temporary files but avoid removing original input
+cleanup_temp() {
+    if [[ "$1" == "$2" ]]; then
+        echo "ℹ️ Skipping cleanup: same as original input."
+    elif [[ -f "$1" ]]; then
+        rm "$1"
+    fi
+}
+
+# Load config file if available
 CONFIG_FILE=""
 if [[ "$NO_CONFIG" == false ]]; then
     if [[ -f "$(dirname "$0")/import_audio.conf" ]]; then
@@ -76,7 +87,13 @@ else
     echo "[⚠️] Config file loading disabled."
 fi
 
-prompt_settings() {
+# Compute whether to apply "default" disposition to added audio
+get_default_flag() {
+    [[ "$MODE" == "add" && "$SET_AD_DEFAULT" =~ ^[Yy]$ ]] && echo "-disposition:a:1 default"
+}
+
+# Ask user for codec and bitrate options
+prompt_codec_and_bitrate() {
     echo
     read -p "Choose audio codec (wav/aac/eac3) [default=${CODEC:-eac3}]: " c
     CODEC="${c:-$CODEC}"
@@ -100,41 +117,48 @@ prompt_settings() {
     else
         USER_BITRATE=""
     fi
+}
 
-    if [[ "$AUDIO_ONLY" == false ]]; then
-        echo
-        read -p "What would you like to do with the audio? (add/replace) [default=${MODE:-replace}]: " m
-        MODE="${m:-$MODE}"
+# Ask user for container type and muxing options
+prompt_muxing_settings() {
+    echo
+    read -p "What would you like to do with the audio? (add/replace) [default=${MODE:-replace}]: " m
+    MODE="${m:-$MODE}"
 
-        echo
-        DEFAULT_CONTAINER="${CONTAINER:-mkv}"
-        read -p "Select container (mp4/mkv) [default=$DEFAULT_CONTAINER]: " cont
-        CONTAINER="${cont:-$DEFAULT_CONTAINER}"
-        [[ "$CONTAINER" == "mp4" && "$CODEC" != "aac" ]] && echo "⚠️ Forcing MKV due to codec" && CONTAINER="mkv"
+    echo
+    DEFAULT_CONTAINER="${CONTAINER:-mkv}"
+    read -p "Select container (mp4/mkv) [default=$DEFAULT_CONTAINER]: " cont
+    CONTAINER="${cont:-$DEFAULT_CONTAINER}"
+    [[ "$CONTAINER" == "mp4" && "$CODEC" != "aac" ]] && echo "⚠️ Forcing MKV due to codec" && CONTAINER="mkv"
 
-        echo
-        read -p "Strip marker chapters from audio? (Y/N) [default=${STRIP_MARKERS:-Y}]: " sm
-        STRIP_MARKERS="${sm:-$STRIP_MARKERS}"
+    echo
+    read -p "Strip marker chapters from audio? (Y/N) [default=${STRIP_MARKERS:-Y}]: " sm
+    STRIP_MARKERS="${sm:-$STRIP_MARKERS}"
 
-        DEFAULT_FLAG=""
-        if [[ "$MODE" == "add" ]]; then
-            read -p "Set AD as default audio? (Y/N) [default=${SET_AD_DEFAULT:-N}]: " d
-            SET_AD_DEFAULT="${d:-$SET_AD_DEFAULT}"
-            [[ "$SET_AD_DEFAULT" =~ ^[Yy]$ ]] && DEFAULT_FLAG="-disposition:a:1 default"
-        fi
+    if [[ "$MODE" == "add" ]]; then
+        read -p "Set AD as default audio? (Y/N) [default=${SET_AD_DEFAULT:-N}]: " d
+        SET_AD_DEFAULT="${d:-$SET_AD_DEFAULT}"
+        DEFAULT_FLAG=$(get_default_flag)
     fi
 }
 
+# Wrapper for all prompts
+prompt_settings() {
+    prompt_codec_and_bitrate
+    [[ "$AUDIO_ONLY" == false ]] && prompt_muxing_settings
+}
+
+# Handle muxing logic for a single video/audio pair
 process_pair() {
     local VIDEO="$1"
     local AUDIO="$2"
     local OUTDIR="$3"
-    local BASENAME
-    BASENAME=$(basename "${VIDEO%.*}")
+    local BASENAME=$(basename "${VIDEO%.*}")
     local EXTENSION="${VIDEO##*.}"
 
     CLEAN_INPUT="${OUTDIR}/${BASENAME}_cleaned_input.${CONTAINER}"
 
+    # Drop incompatible subtitle tracks depending on container
     if [[ "$EXTENSION" == "mp4" ]]; then
         if [[ "$CONTAINER" == "mp4" ]]; then
             ffmpeg -y -i "$VIDEO" -map 0:v -map 0:a -map 0:s\? -c copy "$CLEAN_INPUT" || {
@@ -152,10 +176,12 @@ process_pair() {
         CLEAN_INPUT="$VIDEO"
     fi
 
+    # Determine channel layout of provided audio
     CHANNELS=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels \
         -of default=nokey=1:noprint_wrappers=1 "$AUDIO")
     [[ -z "$CHANNELS" ]] && CHANNELS=2
 
+    # Use fallback bitrate logic if none is specified
     if [[ -z "$USER_BITRATE" && "$CODEC" != "wav" ]]; then
         if [[ "$CHANNELS" == "2" ]]; then
             USER_BITRATE="224k"
@@ -173,6 +199,7 @@ process_pair() {
     echo
     echo "🎬 $(basename "$VIDEO") ⇄ $(basename "$AUDIO") → $OUTFILE"
 
+    # Add or replace audio streams
     if [[ "$MODE" == "add" ]]; then
         ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
             -map 0:v:0 -map 0:a:0 -map 1:a:0 \
@@ -188,7 +215,7 @@ process_pair() {
     cleanup_temp "$CLEAN_INPUT" "$VIDEO"
 }
 
-# === Main ===
+# === Main logic ===
 if [[ "$AUDIO_ONLY" == true ]]; then
     is_file "$INPUT1" || { echo "❌ You must provide an audio file."; exit 1; }
     prompt_settings
@@ -198,6 +225,7 @@ if [[ "$AUDIO_ONLY" == true ]]; then
     exit 0
 fi
 
+# Determine mode type
 if is_file "$INPUT1" && is_file "$INPUT2"; then
     MODE_TYPE="single"
 elif is_directory "$INPUT1" && is_directory "$INPUT2"; then
@@ -207,6 +235,7 @@ else
     print_usage
 fi
 
+# Single pair mux
 if [[ "$MODE_TYPE" == "single" ]]; then
     prompt_settings
     process_pair "$INPUT1" "$INPUT2" "$(dirname "$INPUT1")"
@@ -215,10 +244,11 @@ if [[ "$MODE_TYPE" == "single" ]]; then
     exit 0
 fi
 
+# Batch mode: pair video/audio files by index
 VIDEO_FILES=()
 AUDIO_FILES=()
-while IFS= read -r -d '' file; do VIDEO_FILES+=("$file"); done < <(find "$INPUT1" -type f -print0 | sort -z)
-while IFS= read -r -d '' file; do AUDIO_FILES+=("$file"); done < <(find "$INPUT2" -type f -print0 | sort -z)
+while IFS= read -r -d '' file; do VIDEO_FILES+=("$file"); done < <(find "$INPUT1" -type f -print0 | sort -zV)
+while IFS= read -r -d '' file; do AUDIO_FILES+=("$file"); done < <(find "$INPUT2" -type f -print0 | sort -zV)
 
 NUM_VID=${#VIDEO_FILES[@]}
 NUM_AUD=${#AUDIO_FILES[@]}
