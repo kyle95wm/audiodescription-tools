@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # === Auto-updater ===
-# This section checks for the latest version of this script and updates it automatically if needed.
+# Automatically checks for and applies updates from the online repository
 UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/main/audio_video_tools/import_audio.sh?$(date +%s)"
 SCRIPT_PATH="$(realpath "$0")"
 
@@ -27,10 +27,10 @@ else
 fi
 rm -f "$LATEST_SCRIPT"
 
-# Display usage/help text for the script
+# Displays script usage information
 print_usage() {
     echo "Usage:"
-    echo "  Single mux: $0 <video_file> <audio_file>"
+    echo "  Single mux: $0 <video_file> <audio_file1> [audio_file2 ...]"
     echo "  Batch mux:  $0 <video_folder> <audio_folder> [output_folder]"
     echo "  Audio only: $0 <audio_file> --audio-only"
     echo
@@ -40,28 +40,34 @@ print_usage() {
     exit 1
 }
 
-# Ensure ffmpeg and ffprobe are installed
+# Check required tools are installed
 command -v ffmpeg >/dev/null || { echo "❌ ffmpeg not found."; exit 1; }
 command -v ffprobe >/dev/null || { echo "❌ ffprobe not found."; exit 1; }
 
 [[ $# -lt 1 ]] && print_usage
 
 INPUT1="$1"
-INPUT2="$2"
-OUTPUT_DIR="${3:-$(pwd)}"
+shift
+AUDIO_FILES=()
 
+# Parse arguments and flags
+OUTPUT_DIR="$(pwd)"
 NO_CONFIG=false
 AUDIO_ONLY=false
+
 for arg in "$@"; do
-    [[ "$arg" == "--no-config" || "$arg" == "-nc" ]] && NO_CONFIG=true
-    [[ "$arg" == "--audio-only" || "$arg" == "-ao" ]] && AUDIO_ONLY=true
+    case "$arg" in
+        --no-config|-nc) NO_CONFIG=true ;;
+        --audio-only|-ao) AUDIO_ONLY=true ;;
+        *) AUDIO_FILES+=("$arg") ;;
+    esac
 done
 
-# Basic helpers
+# Helper functions
 is_directory() { [[ -d "$1" ]]; }
 is_file() { [[ -f "$1" ]]; }
 
-# Clean up temporary files but avoid removing original input
+# Safely deletes temp files unless they are the original input
 cleanup_temp() {
     if [[ "$1" == "$2" ]]; then
         echo "ℹ️ Skipping cleanup: same as original input."
@@ -70,7 +76,7 @@ cleanup_temp() {
     fi
 }
 
-# Load config file if available
+# Load configuration file from known locations
 CONFIG_FILE=""
 if [[ "$NO_CONFIG" == false ]]; then
     if [[ -f "$(dirname "$0")/import_audio.conf" ]]; then
@@ -87,12 +93,12 @@ else
     echo "[⚠️] Config file loading disabled."
 fi
 
-# Compute whether to apply "default" disposition to added audio
+# Determines whether to set the audio stream as default
 get_default_flag() {
-    [[ "$MODE" == "add" && "$SET_AD_DEFAULT" =~ ^[Yy]$ ]] && echo "-disposition:a:1 default"
+    [[ "$MODE" == "add" && "$SET_AD_DEFAULT" =~ ^[Yy]$ ]] && echo "-disposition:a:${DEFAULT_AUDIO_INDEX} default"
 }
 
-# Ask user for codec and bitrate options
+# Prompt user to select codec and optional bitrate
 prompt_codec_and_bitrate() {
     echo
     read -p "Choose audio codec (wav/aac/eac3) [default=${CODEC:-eac3}]: " c
@@ -119,7 +125,7 @@ prompt_codec_and_bitrate() {
     fi
 }
 
-# Ask user for container type and muxing options
+# Prompt for muxing options: container, mode, etc.
 prompt_muxing_settings() {
     echo
     read -p "What would you like to do with the audio? (add/replace) [default=${MODE:-replace}]: " m
@@ -135,30 +141,30 @@ prompt_muxing_settings() {
     read -p "Strip marker chapters from audio? (Y/N) [default=${STRIP_MARKERS:-Y}]: " sm
     STRIP_MARKERS="${sm:-$STRIP_MARKERS}"
 
-    if [[ "$MODE" == "add" ]]; then
+    if [[ "$MODE" == "add" && ${#AUDIO_FILES[@]} -gt 0 ]]; then
         read -p "Set AD as default audio? (Y/N) [default=${SET_AD_DEFAULT:-N}]: " d
         SET_AD_DEFAULT="${d:-$SET_AD_DEFAULT}"
-        DEFAULT_FLAG=$(get_default_flag)
     fi
 }
 
-# Wrapper for all prompts
+# Combined prompting
 prompt_settings() {
     prompt_codec_and_bitrate
     [[ "$AUDIO_ONLY" == false ]] && prompt_muxing_settings
 }
 
-# Handle muxing logic for a single video/audio pair
+# Mux video and one or more audio files into an output container
 process_pair() {
     local VIDEO="$1"
-    local AUDIO="$2"
-    local OUTDIR="$3"
+    shift
+    local AUDIO_LIST=("$@")
+    local OUTDIR="$(dirname "$VIDEO")"
     local BASENAME=$(basename "${VIDEO%.*}")
     local EXTENSION="${VIDEO##*.}"
 
     CLEAN_INPUT="${OUTDIR}/${BASENAME}_cleaned_input.${CONTAINER}"
 
-    # Drop incompatible subtitle tracks depending on container
+    # Clean MP4 subtitles depending on container
     if [[ "$EXTENSION" == "mp4" ]]; then
         if [[ "$CONTAINER" == "mp4" ]]; then
             ffmpeg -y -i "$VIDEO" -map 0:v -map 0:a -map 0:s\? -c copy "$CLEAN_INPUT" || {
@@ -176,46 +182,36 @@ process_pair() {
         CLEAN_INPUT="$VIDEO"
     fi
 
-    # Determine channel layout of provided audio
-    CHANNELS=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels \
-        -of default=nokey=1:noprint_wrappers=1 "$AUDIO")
-    [[ -z "$CHANNELS" ]] && CHANNELS=2
+    # Build FFmpeg argument arrays
+    local FF_ARGS=( -y -i "$CLEAN_INPUT" )
+    local MAP_ARGS=( -map 0:v:0 )
+    local AUDIO_INDEX=1
 
-    # Use fallback bitrate logic if none is specified
-    if [[ -z "$USER_BITRATE" && "$CODEC" != "wav" ]]; then
-        if [[ "$CHANNELS" == "2" ]]; then
-            USER_BITRATE="224k"
-        elif [[ "$CHANNELS" -ge 6 ]]; then
-            USER_BITRATE="640k"
-        else
-            USER_BITRATE="224k"
-        fi
-    fi
+    for AUDIO_FILE in "${AUDIO_LIST[@]}"; do
+        FF_ARGS+=( -i "$AUDIO_FILE" )
+        MAP_ARGS+=( -map ${AUDIO_INDEX}:a:0 )
+        AUDIO_INDEX=$((AUDIO_INDEX+1))
+    done
 
     local OUTFILE_SUFFIX="_with_AD"
     [[ "$MODE" == "replace" ]] && OUTFILE_SUFFIX="_replaced_audio"
     local OUTFILE="${OUTDIR}/${BASENAME}${OUTFILE_SUFFIX}.${CONTAINER}"
 
-    echo
-    echo "🎬 $(basename "$VIDEO") ⇄ $(basename "$AUDIO") → $OUTFILE"
+    DEFAULT_AUDIO_INDEX=1
+    DEFAULT_FLAG=$(get_default_flag)
 
-    # Add or replace audio streams
-    if [[ "$MODE" == "add" ]]; then
-        ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
-            -map 0:v:0 -map 0:a:0 -map 1:a:0 \
-            -c:v copy -c:a copy -c:a:1 "$CODEC" -b:a:1 "$USER_BITRATE" \
-            $DEFAULT_FLAG "$OUTFILE"
-    else
-        ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
-            -map 0:v:0 -map 1:a:0 \
-            -c:v copy -c:a "$CODEC" -b:a "$USER_BITRATE" \
-            "$OUTFILE"
-    fi
+    echo
+    echo "🎬 $(basename "$VIDEO") ⇄ ${#AUDIO_LIST[@]} audio files → $OUTFILE"
+
+    # Execute FFmpeg with stream mappings, encoding, and optional default flag
+    ffmpeg "${FF_ARGS[@]}" "${MAP_ARGS[@]}" \
+        -c:v copy $(for i in $(seq 1 ${#AUDIO_LIST[@]}); do echo -n "-c:a:$((i-1)) $CODEC -b:a:$((i-1)) $USER_BITRATE "; done) \
+        $DEFAULT_FLAG "$OUTFILE"
 
     cleanup_temp "$CLEAN_INPUT" "$VIDEO"
 }
 
-# === Main logic ===
+# Handle audio-only re-encoding mode
 if [[ "$AUDIO_ONLY" == true ]]; then
     is_file "$INPUT1" || { echo "❌ You must provide an audio file."; exit 1; }
     prompt_settings
@@ -225,50 +221,21 @@ if [[ "$AUDIO_ONLY" == true ]]; then
     exit 0
 fi
 
-# Determine mode type
-if is_file "$INPUT1" && is_file "$INPUT2"; then
+# Determine operation mode based on input types
+if is_file "$INPUT1" && [[ ${#AUDIO_FILES[@]} -gt 0 ]]; then
     MODE_TYPE="single"
-elif is_directory "$INPUT1" && is_directory "$INPUT2"; then
+elif is_directory "$INPUT1" && is_directory "${AUDIO_FILES[0]}"; then
     MODE_TYPE="batch"
 else
     echo "❌ Invalid input types."
     print_usage
 fi
 
-# Single pair mux
+# Run single-file mux operation
 if [[ "$MODE_TYPE" == "single" ]]; then
     prompt_settings
-    process_pair "$INPUT1" "$INPUT2" "$(dirname "$INPUT1")"
+    process_pair "$INPUT1" "${AUDIO_FILES[@]}"
     echo
     echo "✅ Single mux complete."
     exit 0
 fi
-
-# Batch mode: pair video/audio files by index
-VIDEO_FILES=()
-AUDIO_FILES=()
-while IFS= read -r -d '' file; do VIDEO_FILES+=("$file"); done < <(find "$INPUT1" -type f -print0 | sort -zV)
-while IFS= read -r -d '' file; do AUDIO_FILES+=("$file"); done < <(find "$INPUT2" -type f -print0 | sort -zV)
-
-NUM_VID=${#VIDEO_FILES[@]}
-NUM_AUD=${#AUDIO_FILES[@]}
-PAIRS=$((NUM_VID<NUM_AUD ? NUM_VID : NUM_AUD))
-
-echo
-echo "🧾 Pairing:"
-for ((i=0; i<PAIRS; i++)); do
-    echo "  [$((i+1))] $(basename "${VIDEO_FILES[$i]}") ⇄ $(basename "${AUDIO_FILES[$i]}")"
-done
-
-echo
-read -p "Proceed with these $PAIRS pairs? [Y/n]: " CONFIRM
-[[ "$CONFIRM" =~ ^[Nn]$ ]] && echo "Cancelled." && exit 1
-
-prompt_settings
-
-for ((i=0; i<PAIRS; i++)); do
-    process_pair "${VIDEO_FILES[$i]}" "${AUDIO_FILES[$i]}" "$OUTPUT_DIR"
-done
-
-echo
-echo "✅ Batch complete."
