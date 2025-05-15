@@ -106,8 +106,9 @@ prompt_settings() {
         MODE="${m:-$MODE}"
 
         echo
-        read -p "Select container (mp4/mkv) [default=${CONTAINER:-mkv}]: " cont
-        CONTAINER="${cont:-$CONTAINER}"
+        DEFAULT_CONTAINER="${CONTAINER:-mkv}"
+        read -p "Select container (mp4/mkv) [default=$DEFAULT_CONTAINER]: " cont
+        CONTAINER="${cont:-$DEFAULT_CONTAINER}"
         [[ "$CONTAINER" == "mp4" && "$CODEC" != "aac" ]] && echo "⚠️ Forcing MKV due to codec" && CONTAINER="mkv"
 
         echo
@@ -170,8 +171,8 @@ process_pair() {
     local EXTENSION="${VIDEO##*.}"
 
     if [[ "$EXTENSION" == "mp4" ]]; then
-        CLEAN_INPUT="${OUTDIR}/${BASENAME}_cleaned_input.mkv"
-        ffmpeg -y -i "$VIDEO" -map 0 -map -0:s -c copy "$CLEAN_INPUT" || {
+        CLEAN_INPUT="${OUTDIR}/${BASENAME}_cleaned_input.${CONTAINER}"
+        ffmpeg -y -i "$VIDEO" -map 0:v -map 0:a -map 0:s\? -c copy "$CLEAN_INPUT" || {
             echo "❌ Failed to clean MP4 input. Aborting."
             return 1
         }
@@ -204,7 +205,7 @@ process_pair() {
         ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
             -map 0:v:0 -map 0:a:0 -map 1:a:0 \
             -c:v copy -c:a copy -c:a:1 "$CODEC" -b:a:1 "$USER_BITRATE" \
-            "$OUTFILE"
+            $DEFAULT_FLAG "$OUTFILE"
     else
         ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" \
             -map 0:v:0 -map 1:a:0 \
