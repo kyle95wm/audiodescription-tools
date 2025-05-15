@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# === Auto-updater (comment out to disable) ===
+# === Auto-updater ===
 UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/main/audio_video_tools/import_audio.sh?$(date +%s)"
 SCRIPT_PATH="$(realpath "$0")"
 
@@ -27,6 +27,7 @@ fi
 rm -f "$LATEST_SCRIPT"
 # === End auto-updater ===
 
+# -- Initialization --
 print_usage() {
     echo "Usage:"
     echo "  Single mux: $0 <video_file> <audio_file>"
@@ -124,44 +125,6 @@ prompt_settings() {
     fi
 }
 
-process_audio_only() {
-    local AUDIO="$1"
-    local OUTDIR="$2"
-    local BASENAME
-    BASENAME=$(basename "${AUDIO%.*}")
-    local OUTFILE="${OUTDIR}/${BASENAME}_reencoded.${EXT}"
-
-    echo
-    echo "🎧 Re-encoding $(basename "$AUDIO") → $OUTFILE"
-
-    CHANNELS=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels \
-        -of default=nokey=1:noprint_wrappers=1 "$AUDIO")
-    [[ -z "$CHANNELS" ]] && CHANNELS=2
-
-    if [[ -z "$USER_BITRATE" && "$CODEC" != "wav" ]]; then
-        if [[ "$CHANNELS" == "2" ]]; then
-            USER_BITRATE="224k"
-            echo "[ℹ️] Defaulting to 224k for EAC3 stereo."
-        elif [[ "$CHANNELS" -ge 6 ]]; then
-            USER_BITRATE="640k"
-            echo "[ℹ️] Defaulting to 640k for EAC3 5.1+ surround."
-        else
-            USER_BITRATE="224k"
-            echo "[ℹ️] Defaulting to 224k fallback."
-        fi
-    fi
-
-    if [[ "$CODEC" == "wav" ]]; then
-        ffmpeg -y -i "$AUDIO" -c:a "$CODEC" -ac "$CHANNELS" "$OUTFILE"
-    else
-        ffmpeg -y -i "$AUDIO" -c:a "$CODEC" -b:a "$USER_BITRATE" -ac "$CHANNELS" "$OUTFILE"
-    fi
-
-    echo
-    echo "📋 Copy-paste this command to mux the audio with your video:"
-    echo "ffmpeg -i \"your_video.mp4\" -i \"$(basename "$OUTFILE")\" -map 0:v -map 1:a -c:v copy -c:a copy \"your_new_video.mkv\""
-}
-
 process_pair() {
     local VIDEO="$1"
     local AUDIO="$2"
@@ -170,12 +133,21 @@ process_pair() {
     BASENAME=$(basename "${VIDEO%.*}")
     local EXTENSION="${VIDEO##*.}"
 
+    CLEAN_INPUT="${OUTDIR}/${BASENAME}_cleaned_input.${CONTAINER}"
+
     if [[ "$EXTENSION" == "mp4" ]]; then
-        CLEAN_INPUT="${OUTDIR}/${BASENAME}_cleaned_input.${CONTAINER}"
-        ffmpeg -y -i "$VIDEO" -map 0:v -map 0:a -map 0:s\? -c copy "$CLEAN_INPUT" || {
-            echo "❌ Failed to clean MP4 input. Aborting."
-            return 1
-        }
+        if [[ "$CONTAINER" == "mp4" ]]; then
+            ffmpeg -y -i "$VIDEO" -map 0:v -map 0:a -map 0:s\? -c copy "$CLEAN_INPUT" || {
+                echo "❌ Failed to clean MP4 input (mp4 target). Aborting."
+                return 1
+            }
+        else
+            echo "[⚠️] Dropping MP4 subtitle stream (mov_text not supported in MKV)"
+            ffmpeg -y -i "$VIDEO" -map 0:v -map 0:a -c copy "$CLEAN_INPUT" || {
+                echo "❌ Failed to clean MP4 input (mkv target). Aborting."
+                return 1
+            }
+        fi
     else
         CLEAN_INPUT="$VIDEO"
     fi
@@ -216,7 +188,7 @@ process_pair() {
     cleanup_temp "$CLEAN_INPUT" "$VIDEO"
 }
 
-# === Main Run ===
+# === Main ===
 if [[ "$AUDIO_ONLY" == true ]]; then
     is_file "$INPUT1" || { echo "❌ You must provide an audio file."; exit 1; }
     prompt_settings
@@ -255,7 +227,7 @@ PAIRS=$((NUM_VID<NUM_AUD ? NUM_VID : NUM_AUD))
 echo
 echo "🧾 Pairing:"
 for ((i=0; i<PAIRS; i++)); do
-    echo "  [$(($i+1))] $(basename "${VIDEO_FILES[$i]}") ⇄ $(basename "${AUDIO_FILES[$i]}")"
+    echo "  [$((i+1))] $(basename "${VIDEO_FILES[$i]}") ⇄ $(basename "${AUDIO_FILES[$i]}")"
 done
 
 echo
