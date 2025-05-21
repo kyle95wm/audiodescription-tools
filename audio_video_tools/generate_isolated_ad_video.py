@@ -6,14 +6,6 @@ import sys
 import urllib.request
 from pathlib import Path
 
-def ensure_black_image():
-    if not os.path.exists("black.png"):
-        print("Generating black background image...")
-        subprocess.run([
-            "ffmpeg", "-f", "lavfi", "-i", "color=c=black:s=1920x1080",
-            "-frames:v", "1", "black.png"
-        ])
-
 def generate_video(audio_file, title_line, subtitle_line, footer_line, output_file):
     subtitle_line = subtitle_line.replace("'", "\\'")
     footer_line = footer_line.replace("'", "\\'")
@@ -21,9 +13,8 @@ def generate_video(audio_file, title_line, subtitle_line, footer_line, output_fi
 
     cmd = [
         "ffmpeg",
-        "-loop", "1",
-        "-framerate", "1",
-        "-i", "black.png",
+        "-f", "lavfi",
+        "-i", "color=c=black:s=1920x1080",
         "-i", audio_file,
         "-vf",
         f"drawtext=font=Arial:text='{title_line}':fontsize=48:fontcolor=white:x=(w-text_w)/2:y=400,"\
@@ -75,8 +66,6 @@ if __name__ == "__main__":
 
     title = input("Main title (e.g. Audio Description Track): ").strip() or "Audio Description Track"
     footer = input("Footer (e.g. Audio Only – Sync with your own copy): ").strip() or "Audio Only – Sync with your own copy"
-
-    ensure_black_image()
 
     if mode == "y":
         input_dir = input("Path to folder of audio files: ").strip()
