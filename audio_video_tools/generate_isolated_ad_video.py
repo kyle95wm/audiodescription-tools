@@ -3,6 +3,7 @@
 import subprocess
 import os
 import sys
+import urllib.request
 from pathlib import Path
 
 def ensure_black_image():
@@ -14,6 +15,10 @@ def ensure_black_image():
         ])
 
 def generate_video(audio_file, title_line, subtitle_line, footer_line, output_file):
+    subtitle_line = subtitle_line.replace("'", "\\'")
+    footer_line = footer_line.replace("'", "\\'")
+    title_line = title_line.replace("'", "\\'")
+
     cmd = [
         "ffmpeg",
         "-loop", "1",
@@ -43,7 +48,29 @@ def process_directory(input_dir, title_line, footer_line, output_dir):
         print(f"\nProcessing: {audio_path.name} → {output_file}")
         generate_video(str(audio_path), title_line, subtitle_line, footer_line, output_file)
 
+def check_for_updates(script_path):
+    url = "https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/refs/heads/main/audio_video_tools/generate_isolated_ad_video.py"
+    try:
+        with urllib.request.urlopen(url) as response:
+            latest_code = response.read().decode("utf-8")
+        with open(script_path, "r") as current_file:
+            current_code = current_file.read()
+        if current_code.strip() != latest_code.strip():
+            print("\nAn updated version of this script is available.")
+            choice = input("Do you want to overwrite this file with the latest version? (y/n): ").strip().lower()
+            if choice == "y":
+                with open(script_path, "w") as current_file:
+                    current_file.write(latest_code)
+                print("Script updated. Please re-run it.")
+                sys.exit(0)
+            else:
+                print("Continuing with current version...")
+    except Exception as e:
+        print(f"Could not check for updates: {e}")
+
 if __name__ == "__main__":
+    check_for_updates(__file__)
+
     mode = input("Run in batch mode? (y/n): ").strip().lower()
 
     title = input("Main title (e.g. Audio Description Track): ").strip() or "Audio Description Track"
@@ -65,4 +92,3 @@ if __name__ == "__main__":
         subtitle = input("Subtitle (e.g. Earth to Echo (2014)): ").strip() or "Unknown Title"
         output = input("Output filename (e.g. ad_video.mp4): ").strip() or "ad_video.mp4"
         generate_video(audio, title, subtitle, footer, output)
-
