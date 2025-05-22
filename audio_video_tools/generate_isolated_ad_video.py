@@ -6,6 +6,39 @@ import sys
 import urllib.request
 from pathlib import Path
 
+def generate_youtube_info(title_line, subtitle_line, footer_line):
+    clean_title = subtitle_line.strip()
+    print("\n======================")
+    print(f"Title:\nIsolated Audio Description Track – {clean_title}\n")
+
+    print("Description:")
+    print(f"""
+🎧 This is a standalone Audio Description (AD) track for *{clean_title}*, created to improve accessibility for blind and visually impaired audiences.
+
+🕒 This AD track is synced to a common version of the film or episode (check runtime if needed).
+
+🎬 To use: Press play on this track at the same time as your copy. It's designed for smooth sync from the start—no adjustments necessary if your version matches the runtime.
+
+🗣️ This track contains only the AD narration. Use it alongside your own copy for an accessible viewing experience.
+
+---
+
+❗ This video is not affiliated with the rights holders or distributors. No video or original audio is included—this is an accessibility resource only.
+
+🎙️ Narrated and produced by: [Your Name]
+🎧 Mixed for headphone playback
+
+📅 This track was originally recorded on [Insert Date Here]
+
+---
+
+#AudioDescription #{clean_title.replace(' ', '')} #Accessibility #DescribedVideo #BlindCinema #ADTrack #AccessibleMedia
+""")
+
+    print("Tags:")
+    print(f"audio description, {clean_title.lower()}, described video, accessibility, ad narration, ad track, blind audio, accessible cinema, isolated audio description")
+    print("======================\n")
+
 def generate_video(audio_file, title_line, subtitle_line, footer_line, output_file):
     subtitle_line = subtitle_line.replace("'", "\\'")
     footer_line = footer_line.replace("'", "\\'")
@@ -30,6 +63,7 @@ def generate_video(audio_file, title_line, subtitle_line, footer_line, output_fi
     ]
 
     subprocess.run(cmd)
+    generate_youtube_info(title_line, subtitle_line, footer_line)
 
 def process_directory(input_dir, title_line, footer_line, output_dir):
     for audio_path in sorted(Path(input_dir).glob("*.wav")):
