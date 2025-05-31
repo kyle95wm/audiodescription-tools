@@ -15,12 +15,16 @@ def get_frame_rate(video_file):
     num, denom = map(int, rate.split('/'))
     return num / denom
 
-def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, subs_only=False, downscale_720=False):
+def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, subs_only=False, downscale_720=False, force=False):
     frame_rate = get_frame_rate(video_file)
     base_name, _ = os.path.splitext(os.path.basename(video_file))
 
     output_prefix = "tc_" if smpte_only else "subs_" if subs_only else "burn_"
     output_file = os.path.join("output", f"{output_prefix}{base_name}.mp4")
+
+    if os.path.isfile(output_file) and not force:
+        print(f"⏩ Skipping {base_name} (already processed)")
+        return
 
     filters = []
 
@@ -46,7 +50,9 @@ def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, 
             "MarginL=12",
             "MarginR=12"
         ]
-        filters.append(f"subtitles={srt_file}:force_style='{','.join(style_parts)}'")
+        srt_file_clean = os.path.abspath(srt_file).replace('\\', '/').replace("'", r"\\'")
+        force_style = ','.join(style_parts).replace("'", r"\\'")
+        filters.append(f"subtitles='{srt_file_clean}':force_style='{force_style}'")
 
     ffmpeg_command = [
         'ffmpeg', '-y',
@@ -62,7 +68,7 @@ def burn_subtitles(video_file, srt_file=None, font_size=None, smpte_only=False, 
     except subprocess.CalledProcessError as e:
         print(f"✖ FFmpeg failed on {video_file} (exit code {e.returncode})")
 
-def batch_process(font_size=None, smpte_only=False, subs_only=False, downscale_720=False):
+def batch_process(font_size=None, smpte_only=False, subs_only=False, downscale_720=False, force=False):
     os.makedirs("output", exist_ok=True)
     video_exts = ['.mp4', '.mkv', '.mov']
     for file in os.listdir():
@@ -78,7 +84,7 @@ def batch_process(font_size=None, smpte_only=False, subs_only=False, downscale_7
             print(f"Skipping {file} (no matching SRT found)")
             continue
 
-        burn_subtitles(file, srt_file, font_size, smpte_only, subs_only, downscale_720)
+        burn_subtitles(file, srt_file, font_size, smpte_only, subs_only, downscale_720, force)
 
 if __name__ == "__main__":
     args = sys.argv[1:]
@@ -87,6 +93,7 @@ if __name__ == "__main__":
     subs_only = '--subs-only' in args
     downscale_720 = '--720' in args
     batch_mode = '--batch' in args
+    force_overwrite = '--force' in args
 
     if smpte_only and subs_only:
         print("Error: Cannot use both '--smpte-only' and '--subs-only' together.")
@@ -101,15 +108,15 @@ if __name__ == "__main__":
     os.makedirs("output", exist_ok=True)
 
     if batch_mode:
-        batch_process(font_size, smpte_only, subs_only, downscale_720)
+        batch_process(font_size, smpte_only, subs_only, downscale_720, force_overwrite)
     elif len(positional) >= 1:
         video_file = positional[0]
         srt_file = positional[1] if len(positional) > 1 else None
         if not smpte_only and not srt_file:
             print("Error: Subtitle file required unless using --smpte-only")
             sys.exit(1)
-        burn_subtitles(video_file, srt_file, font_size, smpte_only, subs_only, downscale_720)
+        burn_subtitles(video_file, srt_file, font_size, smpte_only, subs_only, downscale_720, force_overwrite)
     else:
         print("Usage:")
-        print("  python burn_subtitles.py <video_file> <srt_file> [font_size] [--smpte-only | --subs-only] [--720]")
-        print("  python burn_subtitles.py --batch [font_size] [--smpte-only | --subs-only] [--720]")
+        print("  python burn_subtitles.py <video_file> <srt_file> [font_size] [--smpte-only | --subs-only] [--720] [--force]")
+        print("  python burn_subtitles.py --batch [font_size] [--smpte-only | --subs-only] [--720] [--force]")
