@@ -1,5 +1,32 @@
 #!/usr/bin/env python3
 
+"""
+extract_wav_regions.py
+
+This script extracts embedded cue/region metadata from a WAV file and reconstructs an SRT subtitle file.
+It is useful in scenarios where:
+- You’ve lost your original AD (audio description) script in SRT format
+- You only have a WAV file with embedded markers/labels (e.g., exported from Logic Pro, Reaper, etc.)
+- You want to recover approximate timings and text from embedded audio markers
+
+How it works:
+- Parses standard RIFF chunks in a WAV file to find:
+  - 'cue ' chunk for marker sample offsets
+  - 'labl' subchunks for cue text
+  - 'ltxt' subchunks for region duration in samples (when present)
+- Assumes a sample rate of 48,000 Hz (this can be changed)
+- Generates an SRT with 2-second default durations if no region info is present
+
+Limitations:
+- Logic Pro only embeds cue points (not full regions), so durations are estimated
+- Assumes embedded metadata follows the RIFF/adtl format (not iXML or BWF)
+
+Output:
+- Creates an SRT file with approximate timings and cue label text next to each marker
+- Output file is named based on the WAV file, with '_reconstructed.srt' suffix
+
+"""
+
 import sys
 import struct
 import os
@@ -97,4 +124,3 @@ if __name__ == "__main__":
         out_file.write(srt_output)
 
     print(f"✅ SRT file written to {output_path}")
-
