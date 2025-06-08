@@ -1,138 +1,117 @@
 #!/bin/bash
 
-# Function to auto-detect files based on common patterns
+# Auto-detect input video and audio files
 auto_detect_files() {
-    echo "🔍 Auto-detect mode: looking for the following..."
-    echo "- A video file (.mp4, .mkv, .avi)"
-    echo "- An optional stereo audio file with '_Stereo.wav' suffix"
-    echo "- An optional 5.1 audio file with '_SixChannel.wav' suffix"
-
     local video_exts=("mp4" "mkv" "avi")
+    local stereo_suffix="_Stereo.wav"
+    local six_channel_suffix="_SixChannel.wav"
+
     for ext in "${video_exts[@]}"; do
         video_file=$(ls *."$ext" 2>/dev/null | head -n 1)
         if [[ -n "$video_file" ]]; then
-            echo "✅ Found video file: $video_file"
             break
         fi
     done
 
     if [[ -n "$video_file" ]]; then
-        base_name="${video_file%.*}"
-        stereo_audio_file="${base_name}_Stereo.wav"
-        six_channel_audio_file="${base_name}_SixChannel.wav"
+        base="${video_file%.*}"
+        stereo_audio_file="${base}${stereo_suffix}"
+        six_channel_audio_file="${base}${six_channel_suffix}"
 
-        if [[ -f "$stereo_audio_file" ]]; then
-            echo "✅ Found stereo audio file: $stereo_audio_file"
-        else
-            stereo_audio_file=""
-        fi
-
-        if [[ -f "$six_channel_audio_file" ]]; then
-            echo "✅ Found 5.1 audio file: $six_channel_audio_file"
-        else
-            six_channel_audio_file=""
-        fi
+        [[ ! -f "$stereo_audio_file" ]] && stereo_audio_file=""
+        [[ ! -f "$six_channel_audio_file" ]] && six_channel_audio_file=""
     fi
 }
 
-# Argument parsing
+# Parse arguments
 dry_run=0
-batch_mode=0
-args=()
-
 for arg in "$@"; do
-    case "$arg" in
-        --dry-run) dry_run=1 ;;
-        --batch) batch_mode=1 ;;
-        *) args+=("$arg") ;;
-    esac
+    [[ "$arg" == "--dry-run" ]] && dry_run=1
 done
 
-run_mux() {
-    local video_file="$1"
-    local stereo_audio_file="$2"
-    local six_channel_audio_file="$3"
-
-    echo "Do you want to remove the original audio from the video? (y/n, default: y) "
-    read remove_audio_answer
-    remove_audio_answer=${remove_audio_answer:-y}
-    remove_original_audio=0
-    [[ "$remove_audio_answer" =~ ^[Yy]$ ]] && remove_original_audio=1
-
-    local make_51_default=0
-    if [[ -n "$six_channel_audio_file" ]]; then
-        echo "Do you want to make the 5.1 audio stream the default? (y/n, default: n) "
-        read make_51_default_answer
-        make_51_default_answer=${make_51_default_answer:-n}
-        [[ "$make_51_default_answer" =~ ^[Yy]$ ]] && make_51_default=1
-    fi
-
-    echo "Output file name (excluding extension)? Leave blank for default:"
-    read output_filename_base
-    [[ -z "$output_filename_base" ]] && output_filename_base="ad_${video_file%.*}_with_AD"
-    output_video="${output_filename_base}.mp4"
-
-    ffmpeg_cmd="ffmpeg -i \"$video_file\""
-    map_index=0
-
-    if [[ -n "$stereo_audio_file" ]]; then
-        ffmpeg_cmd+=" -i \"$stereo_audio_file\""
-        ((map_index++))
-    fi
-    if [[ -n "$six_channel_audio_file" ]]; then
-        ffmpeg_cmd+=" -i \"$six_channel_audio_file\""
-        ((map_index++))
-    fi
-
-    ffmpeg_cmd+=" -map 0:v -c:v copy"
-
-    if [[ "$remove_original_audio" -eq 1 ]]; then
-        num_audio_streams=0
-    else
-        num_audio_streams=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$video_file" | wc -l)
-    fi
-
-    if [[ -n "$six_channel_audio_file" ]]; then
-        ffmpeg_cmd+=" -map $map_index:a -c:a:$num_audio_streams eac3 -b:a:$num_audio_streams 640k -metadata:s:a:$num_audio_streams language=eng -metadata:s:a:$num_audio_streams title=\"English - Audio Description 5.1\""
-        [[ "$make_51_default" -eq 1 ]] && ffmpeg_cmd+=" -disposition:a:$num_audio_streams default"
-        ((num_audio_streams++))
-    fi
-
-    if [[ -n "$stereo_audio_file" ]]; then
-        ffmpeg_cmd+=" -map $( [[ -n "$six_channel_audio_file" ]] && echo "$((map_index - 1))" || echo "$map_index" ):a"
-        ffmpeg_cmd+=" -c:a:$num_audio_streams aac -b:a:$num_audio_streams 192k -metadata:s:a:$num_audio_streams language=eng -metadata:s:a:$num_audio_streams title=\"English - Audio Description Stereo\""
-        [[ "$make_51_default" -eq 0 ]] && ffmpeg_cmd+=" -disposition:a:$num_audio_streams default"
-    fi
-
-    ffmpeg_cmd+=" \"$output_video\""
-
-    echo ""
-    echo "Executing command:"
-    echo "$ffmpeg_cmd"
-
-    [[ "$dry_run" -eq 0 ]] && eval $ffmpeg_cmd || echo "(Dry run — command not executed.)"
-}
-
-# Main logic
-if [[ "$batch_mode" -eq 1 ]]; then
-    for f in *.mp4 *.mkv *.avi; do
-        [[ -f "$f" ]] || continue
-        base="${f%.*}"
-        s="${base}_Stereo.wav"
-        x="${base}_SixChannel.wav"
-        run_mux "$f" "$([[ -f "$s" ]] && echo "$s")" "$([[ -f "$x" ]] && echo "$x")"
-    done
-elif [[ "${#args[@]}" -eq 0 ]]; then
-    echo "No arguments provided. Attempting auto-detect..."
+# Check if args are provided or fallback to auto-detect
+if [ "$#" -eq 0 ] || [[ "$1" == "--dry-run" ]]; then
+    echo "No arguments provided. Attempting to auto-detect files..."
     auto_detect_files
+
     if [[ -z "$video_file" ]]; then
-        echo "❌ Error: No video file found in the current directory."
+        echo "❌ No video file found."
         exit 1
     fi
-    run_mux "$video_file" "$stereo_audio_file" "$six_channel_audio_file"
+    if [[ -z "$stereo_audio_file" ]]; then
+        echo "❌ Stereo AD file not found for '$video_file'."
+        exit 1
+    fi
 else
-    video_file="${args[0]}"
-    stereo_audio_file="${args[1]}"
-    six_channel_audio_file="${args[2]}"
-    run_mux "$video_file" "$stereo_audio_file" "$six_channel_audio_file"
+    video_file="$1"
+    stereo_audio_file="$2"
+    six_channel_audio_file="${3:-}"
+
+    base="${video_file%.*}"
+    [[ ! -f "$stereo_audio_file" ]] && stereo_audio_file=""
+    [[ ! -f "$six_channel_audio_file" ]] && six_channel_audio_file=""
 fi
+
+# Prompt user for audio handling options
+read -p "Remove original audio? (y/n) [y]: " remove_audio
+remove_audio=${remove_audio:-y}
+remove_original_audio=0
+[[ "$remove_audio" =~ ^[Yy]$ ]] && remove_original_audio=1
+
+make_51_default=0
+if [[ -n "$six_channel_audio_file" ]]; then
+    read -p "Make 5.1 the default? (y/n) [n]: " make_default
+    make_default=${make_default:-n}
+    [[ "$make_default" =~ ^[Yy]$ ]] && make_51_default=1
+fi
+
+read -p "Output file name (no extension)? [default: ad_${base}_with_AD]: " out_name
+out_name=${out_name:-"ad_${base}_with_AD"}
+output_file="${out_name}.mkv"
+
+# Start building ffmpeg command
+ffmpeg_cmd="ffmpeg -i \"$video_file\" -i \"$stereo_audio_file\""
+[[ -n "$six_channel_audio_file" ]] && ffmpeg_cmd+=" -i \"$six_channel_audio_file\""
+
+ffmpeg_cmd+=" -map 0:v -c:v copy"
+
+# Decide where to map audio tracks
+if [ "$remove_original_audio" -eq 1 ]; then
+    audio_index=0
+else
+    audio_index=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$video_file" | wc -l)
+fi
+
+# If 5.1 should be first
+if [ "$make_51_default" -eq 1 ] && [[ -n "$six_channel_audio_file" ]]; then
+    ffmpeg_cmd+=" -map 2:a -c:a:$audio_index eac3 -b:a:$audio_index 640k"
+    ffmpeg_cmd+=" -metadata:s:a:$audio_index language=eng -metadata:s:a:$audio_index title=\"English - Audio Description 5.1\""
+    let audio_index++
+fi
+
+# Always add stereo
+ffmpeg_cmd+=" -map 1:a -c:a:$audio_index aac -b:a:$audio_index 192k"
+ffmpeg_cmd+=" -metadata:s:a:$audio_index language=eng -metadata:s:a:$audio_index title=\"English - Audio Description Stereo\""
+let audio_index++
+
+# If 5.1 is added second
+if [ "$make_51_default" -eq 0 ] && [[ -n "$six_channel_audio_file" ]]; then
+    ffmpeg_cmd+=" -map 2:a -c:a:$audio_index eac3 -b:a:$audio_index 640k"
+    ffmpeg_cmd+=" -metadata:s:a:$audio_index language=eng -metadata:s:a:$audio_index title=\"English - Audio Description 5.1\""
+fi
+
+ffmpeg_cmd+=" \"$output_file\""
+
+# Output the result
+echo ""
+echo "✅ Command to be executed:"
+echo "$ffmpeg_cmd"
+
+if [[ "$dry_run" -eq 1 ]]; then
+    echo "💤 Dry run mode enabled. No changes made."
+    exit 0
+fi
+
+echo ""
+echo "🚀 Running..."
+eval $ffmpeg_cmd
