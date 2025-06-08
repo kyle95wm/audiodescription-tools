@@ -1,68 +1,63 @@
 #!/bin/bash
 
-# Usage:
-# ./mux_ad.sh <video> <wav1> [wav2] <output name without extension> [--dry-run]
+# Usage: ./script.sh <video> <wav1> [wav2] <output> [--dry-run]
 
-if [[ "$1" == "-h" || "$1" == "--help" || $# -lt 3 ]]; then
-  echo "Usage: $0 <video> <wav1> [wav2] <output name (no ext)> [--dry-run]"
+if [[ $# -lt 3 ]]; then
+  echo "Usage: $0 <video> <wav1> [wav2] <output> [--dry-run]"
   exit 1
 fi
 
-video="$1"
-wav1="$2"
-shift 2
+VIDEO="$1"
+WAV1="$2"
+WAV2=""
+OUT=""
+DRY_RUN="false"
 
-# Assume next arg is wav2 if it ends in .wav or .WAV
-if [[ "$1" == *.wav || "$1" == *.WAV ]]; then
-  wav2="$1"
-  shift
+if [[ "$3" == *.wav ]]; then
+  WAV2="$3"
+  OUT="$4"
+  [[ "$5" == "--dry-run" ]] && DRY_RUN="true"
 else
-  wav2=""
+  OUT="$3"
+  [[ "$4" == "--dry-run" ]] && DRY_RUN="true"
 fi
 
-output="$1"
-shift
+# Base FFmpeg command
+CMD=(ffmpeg -y -i "$VIDEO")
 
-dry_run=false
-if [[ "$1" == "--dry-run" ]]; then
-  dry_run=true
+# Add audio inputs
+CMD+=(-i "$WAV1")
+[[ -n "$WAV2" ]] && CMD+=(-i "$WAV2")
+
+# Start mapping: always map video from input 0
+CMD+=(-map 0:v:0)
+
+# Detect channel count for WAV1
+CH1=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels \
+    -of default=noprint_wrappers=1:nokey=1 "$WAV1")
+
+if [[ "$CH1" == "6" ]]; then
+  CMD+=(-map 1:a:0 -c:a:0 eac3 -b:a:0 640k -metadata:s:a:0 title="English - Audio Description 5.1")
+elif [[ "$CH1" == "2" ]]; then
+  CMD+=(-map 1:a:0 -c:a:0 eac3 -b:a:0 192k -metadata:s:a:0 title="English - Audio Description Stereo")
+else
+  echo "Unsupported channel count in $WAV1: $CH1"
+  exit 1
+fi
+CMD+=(-metadata:s:a:0 language=eng)
+
+# If a second WAV is supplied, assume stereo fallback
+if [[ -n "$WAV2" ]]; then
+  CMD+=(-map 2:a:0 -c:a:1 eac3 -b:a:1 192k -metadata:s:a:1 language=eng -metadata:s:a:1 title="English - Audio Description Stereo")
 fi
 
-# Build base FFmpeg command
-cmd=(ffmpeg -y -i "$video" -i "$wav1")
+CMD+=(-c:v copy "$OUT.mkv")
 
-if [[ -n "$wav2" ]]; then
-  cmd+=(-i "$wav2")
-fi
-
-cmd+=(
-  -map 0:v:0
-  -map 1:a:0
-  -c:v copy
-  -c:a:0 eac3
-  -b:a:0 640k
-  -metadata:s:a:0 language=eng
-  -metadata:s:a:0 title="Audio Description 5.1"
-)
-
-if [[ -n "$wav2" ]]; then
-  cmd+=(
-    -map 2:a:0
-    -c:a:1 eac3
-    -b:a:1 192k
-    -metadata:s:a:1 language=eng
-    -metadata:s:a:1 title="Audio Description Stereo"
-  )
-fi
-
-cmd+=("${output}.mkv")
-
-if $dry_run; then
+if [[ "$DRY_RUN" == "true" ]]; then
   echo "🎬 Command to execute:"
-  printf '%q ' "${cmd[@]}"
-  echo
+  echo "${CMD[@]}"
 else
-  echo "🚀 Encoding to ${output}.mkv..."
-  "${cmd[@]}"
+  echo "🚀 Muxing into $OUT.mkv..."
+  "${CMD[@]}"
   echo "✅ Done."
 fi
