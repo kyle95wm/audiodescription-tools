@@ -4,13 +4,13 @@ import os
 import argparse
 import subprocess
 import tempfile
-import shutil
 
-# Hardcoded loudness profile for AudioVault
+# Loudness profile
 PROFILE = {"LUFS": -16.3, "TP": -2.6, "LRA": 5}
 
-# Default paths for bumper and silence
-BUMPER_PATH = os.path.expanduser("~/audio-vault-assets/bumper.mp3")
+# Asset paths
+AVO_HEAD_PATH = os.path.expanduser("~/audio-vault-assets/avo_head.mp3")
+AVO_TAIL_PATH = os.path.expanduser("~/audio-vault-assets/avo_tail.mp3")
 SILENCE_PATH = os.path.expanduser("~/audio-vault-assets/silence_1s.mp3")
 
 def generate_silence(path):
@@ -32,45 +32,50 @@ def ensure_stereo_cbr(input_path, output_path):
 def process_file(input_file, output_file):
     temp_mastered = tempfile.mktemp(suffix=".mp3")
 
-    # Step 1: Process and normalize the main file
-    ffmpeg_cmd = [
+    # Step 1: Normalize and compress
+    subprocess.run([
         "ffmpeg", "-y", "-i", input_file,
         "-af", f"acompressor=threshold=-18dB:ratio=3:attack=10:release=200,"
                f"loudnorm=I={PROFILE['LUFS']}:LRA={PROFILE['LRA']}:TP={PROFILE['TP']}",
         "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "48000", "-ac", "2",
         temp_mastered
-    ]
-    subprocess.run(ffmpeg_cmd, check=True)
+    ], check=True)
 
-    # Step 2: Ensure bumper/silence files exist
-    if not os.path.exists(BUMPER_PATH):
-        raise FileNotFoundError(f"Missing bumper file at {BUMPER_PATH}")
+    # Step 2: Ensure all required files exist
+    for asset in [AVO_HEAD_PATH, AVO_TAIL_PATH]:
+        if not os.path.exists(asset):
+            raise FileNotFoundError(f"Missing asset: {asset}")
     if not os.path.exists(SILENCE_PATH):
         print("Silence file not found, generating...")
         os.makedirs(os.path.dirname(SILENCE_PATH), exist_ok=True)
         generate_silence(SILENCE_PATH)
 
-    # Step 3: Force stereo CBR for bumper/silence
-    fixed_bumper = tempfile.mktemp(suffix=".mp3")
-    fixed_silence = tempfile.mktemp(suffix=".mp3")
-    ensure_stereo_cbr(BUMPER_PATH, fixed_bumper)
-    ensure_stereo_cbr(SILENCE_PATH, fixed_silence)
+    # Step 3: Force stereo CBR on bumpers and silence
+    head_fixed = tempfile.mktemp(suffix=".mp3")
+    tail_fixed = tempfile.mktemp(suffix=".mp3")
+    silence_fixed = tempfile.mktemp(suffix=".mp3")
 
-    # Step 4: Concat silence > bumper > silence > mastered track
-    concat_txt = tempfile.mktemp(suffix=".txt")
-    with open(concat_txt, "w") as f:
-        f.write(f"file '{fixed_silence}'\n")
-        f.write(f"file '{fixed_bumper}'\n")
-        f.write(f"file '{fixed_silence}'\n")
+    ensure_stereo_cbr(AVO_HEAD_PATH, head_fixed)
+    ensure_stereo_cbr(AVO_TAIL_PATH, tail_fixed)
+    ensure_stereo_cbr(SILENCE_PATH, silence_fixed)
+
+    # Step 4: Build concat list: head > mastered > silence > tail > silence
+    concat_list = tempfile.mktemp(suffix=".txt")
+    with open(concat_list, "w") as f:
+        f.write(f"file '{head_fixed}'\n")
         f.write(f"file '{temp_mastered}'\n")
+        f.write(f"file '{silence_fixed}'\n")
+        f.write(f"file '{tail_fixed}'\n")
+        f.write(f"file '{silence_fixed}'\n")
 
+    # Step 5: Concatenate all parts
     subprocess.run([
-        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_txt,
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
         "-c", "copy", output_file
     ], check=True)
 
-    # Clean up
-    for path in [fixed_bumper, fixed_silence, concat_txt, temp_mastered]:
+    # Step 6: Cleanup
+    for path in [head_fixed, tail_fixed, silence_fixed, concat_list, temp_mastered]:
         if os.path.exists(path):
             os.remove(path)
 
