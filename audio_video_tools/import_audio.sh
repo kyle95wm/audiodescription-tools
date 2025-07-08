@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+
 # === Auto-updater ===
 UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/main/audio_video_tools/import_audio.sh?$(date +%s)"
 SCRIPT_PATH="$(realpath "$0")"
@@ -163,21 +164,23 @@ process_pair() {
     if [[ "$COPY_SUBTITLES" =~ ^[Yy]$ ]]; then
         local sub_index=0
         while IFS= read -r codec; do
-            local lang="$(ffprobe -v error -select_streams s:$sub_index \
-                -show_entries stream_tags=language -of default=nokey=1:noprint_wrappers=1 "$VIDEO" | head -n1)"
             local sub_file="${SUBS_TEMP_DIR}/sub${sub_index}.srt"
 
-            if [[ "$CONTAINER" == "mp4" && "$codec" != "mov_text" ]]; then
-                echo "⚠️ Subtitle codec '$codec' not supported in MP4. Skipping stream $sub_index."
-            elif [[ "$CONTAINER" == "mp4" ]]; then
-                SUB_MAPS+=("-map 0:s:$sub_index")
-                SUB_ARGS+=("-c:s:$sub_index mov_text")
-            else
+            if [[ "$EXTENSION" == "mp4" && "$codec" == "mov_text" && "$CONTAINER" == "mkv" ]]; then
                 ffmpeg -y -i "$VIDEO" -map 0:s:$sub_index "$sub_file" >/dev/null 2>&1
                 [[ -f "$sub_file" ]] && SUB_ARGS+=("-sub_charenc" "UTF-8" "-i" "$sub_file")
+            elif [[ "$CONTAINER" == "mp4" && "$codec" == "mov_text" ]]; then
+                SUB_MAPS+=("-map 0:s:$sub_index")
+                SUB_ARGS+=("-c:s:$sub_index mov_text")
+            elif [[ "$CONTAINER" == "mkv" ]]; then
+                ffmpeg -y -i "$VIDEO" -map 0:s:$sub_index "$sub_file" >/dev/null 2>&1
+                [[ -f "$sub_file" ]] && SUB_ARGS+=("-sub_charenc" "UTF-8" "-i" "$sub_file")
+            else
+                echo "⚠️ Skipping unsupported subtitle stream $sub_index ($codec)"
             fi
+
             ((sub_index++))
-        done < <(ffprobe -v error -select_streams s -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$VIDEO")
+        done < <(ffprobe -v error -select_streams s -show_entries stream=codec_name -of default=nokey=1:noprint_wrappers=1 "$VIDEO")
     fi
 
     if [[ "$EXTENSION" == "mp4" && "$CONTAINER" == "mp4" ]]; then
