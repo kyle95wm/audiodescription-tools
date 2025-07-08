@@ -26,7 +26,6 @@ else
 fi
 rm -f "$LATEST_SCRIPT"
 
-# Display usage/help text for the script
 print_usage() {
     echo "Usage:"
     echo "  Single mux: $0 <video_file> <audio_file>"
@@ -161,6 +160,8 @@ process_pair() {
 
     declare -a SUB_MAPS
     declare -a SUB_ARGS
+    declare -a SUB_METADATA
+
     if [[ "$COPY_SUBTITLES" =~ ^[Yy]$ ]]; then
         local sub_index=0
         while IFS= read -r codec; do
@@ -168,32 +169,36 @@ process_pair() {
 
             if [[ "$EXTENSION" == "mp4" && "$codec" == "mov_text" && "$CONTAINER" == "mkv" ]]; then
                 ffmpeg -y -i "$VIDEO" -map 0:s:$sub_index "$sub_file" >/dev/null 2>&1
-                [[ -f "$sub_file" ]] && SUB_ARGS+=("-sub_charenc" "UTF-8" "-i" "$sub_file")
+                if [[ -f "$sub_file" ]]; then
+                    SUB_ARGS+=("-sub_charenc" "UTF-8" "-i" "$sub_file")
+                    SUB_METADATA+=("-metadata:s:s:$sub_index" "language=eng")
+                fi
             elif [[ "$CONTAINER" == "mp4" && "$codec" == "mov_text" ]]; then
                 SUB_MAPS+=("-map 0:s:$sub_index")
-                SUB_ARGS+=("-c:s:$sub_index mov_text")
+                SUB_ARGS+=("-c:s:$sub_index" mov_text)
+                SUB_METADATA+=("-metadata:s:s:$sub_index" "language=eng")
             elif [[ "$CONTAINER" == "mkv" ]]; then
                 ffmpeg -y -i "$VIDEO" -map 0:s:$sub_index "$sub_file" >/dev/null 2>&1
-                [[ -f "$sub_file" ]] && SUB_ARGS+=("-sub_charenc" "UTF-8" "-i" "$sub_file")
+                if [[ -f "$sub_file" ]]; then
+                    SUB_ARGS+=("-sub_charenc" "UTF-8" "-i" "$sub_file")
+                    SUB_METADATA+=("-metadata:s:s:$sub_index" "language=eng")
+                fi
             else
                 echo "⚠️ Skipping unsupported subtitle stream $sub_index ($codec)"
             fi
-
             ((sub_index++))
         done < <(ffprobe -v error -select_streams s -show_entries stream=codec_name -of default=nokey=1:noprint_wrappers=1 "$VIDEO")
     fi
 
     if [[ "$EXTENSION" == "mp4" && "$CONTAINER" == "mp4" ]]; then
         ffmpeg -y -i "$VIDEO" -map 0:v -map 0:a -c copy "$CLEAN_INPUT" >/dev/null 2>&1 || {
-            echo "❌ Failed to clean MP4 input."
-            return 1
+            echo "❌ Failed to clean MP4 input."; return 1;
         }
     else
         CLEAN_INPUT="$VIDEO"
     fi
 
-    CHANNELS=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels \
-        -of default=nokey=1:noprint_wrappers=1 "$AUDIO")
+    CHANNELS=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of default=nokey=1:noprint_wrappers=1 "$AUDIO")
     [[ -z "$CHANNELS" ]] && CHANNELS=2
     [[ -z "$USER_BITRATE" && "$CODEC" != "wav" ]] && USER_BITRATE=$([[ "$CHANNELS" -ge 6 ]] && echo "640k" || echo "224k")
 
@@ -204,11 +209,11 @@ process_pair() {
         ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" "${SUB_ARGS[@]}" \
             -map 0:v:0 -map 0:a:0 -map 1:a:0 "${SUB_MAPS[@]}" \
             -c:v copy -c:a copy -c:a:1 "$CODEC" -b:a:1 "$USER_BITRATE" \
-            ${DEFAULT_FLAG:+-disposition:a:1 default} "$OUTFILE"
+            ${DEFAULT_FLAG:+-disposition:a:1 default} "${SUB_METADATA[@]}" "$OUTFILE"
     else
         ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" "${SUB_ARGS[@]}" \
             -map 0:v:0 -map 1:a:0 "${SUB_MAPS[@]}" \
-            -c:v copy -c:a "$CODEC" -b:a "$USER_BITRATE" "$OUTFILE"
+            -c:v copy -c:a "$CODEC" -b:a "$USER_BITRATE" "${SUB_METADATA[@]}" "$OUTFILE"
     fi
 
     cleanup_temp "$CLEAN_INPUT" "$VIDEO"
