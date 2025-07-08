@@ -1,83 +1,271 @@
 #!/usr/bin/env bash
+# === Auto-updater ===
+UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/main/audio_video_tools/import_audio.sh?$(date +%s)"
+SCRIPT_PATH="$(realpath "$0")"
 
-set -e
+echo "[🔄] Checking for updates..."
 
-INPUT_VIDEO="$1"
-INPUT_AUDIO="$2"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="$SCRIPT_DIR/import_audio.conf"
-
-# Check for updates
-if [ ! -f "$CONFIG_FILE" ]; then
-  echo "[ℹ️] No config file found. Proceeding without config."
+LATEST_SCRIPT=$(mktemp) || { echo "❌ Failed to create temp file."; exit 1; }
+if curl -fsSL "$UPDATE_URL" -o "$LATEST_SCRIPT"; then
+    if grep -q "^#!/usr/bin/env bash" "$LATEST_SCRIPT"; then
+        if ! diff -q "$SCRIPT_PATH" "$LATEST_SCRIPT" >/dev/null; then
+            echo "[⬇️] Update available. Applying update..."
+            cp "$LATEST_SCRIPT" "$SCRIPT_PATH"
+            chmod +x "$SCRIPT_PATH"
+            echo "[✅] Script updated! Re-running..."
+            exec "$SCRIPT_PATH" "$@"
+        else
+            echo "[ℹ️] Already up-to-date."
+        fi
+    else
+        echo "[❌] Update check failed: Downloaded file is not a valid script."
+    fi
 else
-  echo "[🔧] Loading config: $CONFIG_FILE"
-  source "$CONFIG_FILE"
+    echo "[⚠️] Could not check for updates. Continuing with existing script."
 fi
+rm -f "$LATEST_SCRIPT"
 
-read -p $'\nChoose audio codec (wav/aac/eac3) [default=eac3]: ' AUDIO_CODEC
-AUDIO_CODEC="${AUDIO_CODEC:-eac3}"
+print_usage() {
+    echo "Usage:"
+    echo "  Single mux: $0 <video_file> <audio_file>"
+    echo "  Batch mux:  $0 <video_folder> <audio_folder> [output_folder]"
+    echo "  Audio only: $0 <audio_file> --audio-only"
+    echo
+    echo "Optional flags:"
+    echo "  --no-config | -nc      Ignore saved config file"
+    echo "  --audio-only | -ao     Re-encode only the audio"
+    exit 1
+}
 
-echo -e "\nRecommended bitrates: 224k (stereo), 640k (5.1 surround)"
-read -p "Set audio bitrate (e.g., 224k) [leave blank for smart default]: " AUDIO_BITRATE
+command -v ffmpeg >/dev/null || { echo "❌ ffmpeg not found."; exit 1; }
+command -v ffprobe >/dev/null || { echo "❌ ffprobe not found."; exit 1; }
 
-read -p $'\nWhat would you like to do with the audio? (add/replace) [default=replace]: ' AUDIO_ACTION
-AUDIO_ACTION="${AUDIO_ACTION:-replace}"
+[[ $# -lt 1 ]] && print_usage
 
-read -p $'\nSelect container (mp4/mkv) [default=mkv]: ' CONTAINER
-CONTAINER="${CONTAINER:-mkv}"
+INPUT1="$1"
+INPUT2="$2"
+OUTPUT_DIR="${3:-$(pwd)}"
 
-read -p $'\nStrip marker chapters from audio? (Y/N) [default=Y]: ' STRIP_MARKERS
-STRIP_MARKERS="${STRIP_MARKERS:-Y}"
-
-read -p $'\nCopy subtitle tracks from original video? (Y/N) [default=Y]: ' COPY_SUBS
-COPY_SUBS="${COPY_SUBS:-Y}"
-
-OUTPUT_FILE="./$(basename "${INPUT_VIDEO%.*}")_${AUDIO_ACTION}d_audio.${CONTAINER}"
-TMP_DIR=$(mktemp -d)
-MAP_OPTIONS="-map 0:v:0"
-
-# Select original audio based on replace/add mode
-if [ "$AUDIO_ACTION" == "replace" ]; then
-  MAP_OPTIONS+=" -map 1:a:0"
-else
-  MAP_OPTIONS+=" -map 0:a -map 1:a:0"
-fi
-
-# Add subtitle streams if requested
-if [ "$COPY_SUBS" == "Y" ]; then
-  ffprobe -v error -select_streams s -show_entries stream=index -of csv=p=0 "$INPUT_VIDEO" | while read -r IDX; do
-    ffmpeg -y -i "$INPUT_VIDEO" "$TMP_DIR/sub${IDX}.srt" < /dev/null
-    SUBS+=("$TMP_DIR/sub${IDX}.srt")
-  done
-fi
-
-CMD=(ffmpeg -y -i "$INPUT_VIDEO" -i "$INPUT_AUDIO")
-
-# Inject subtitle inputs
-for SUB in "${SUBS[@]}"; do
-  CMD+=(-i "$SUB")
+NO_CONFIG=false
+AUDIO_ONLY=false
+for arg in "$@"; do
+    [[ "$arg" == "--no-config" || "$arg" == "-nc" ]] && NO_CONFIG=true
+    [[ "$arg" == "--audio-only" || "$arg" == "-ao" ]] && AUDIO_ONLY=true
 done
 
-CMD+=(
-  $MAP_OPTIONS
-  -c:v copy
-  -c:a "$AUDIO_CODEC"
-)
+is_directory() { [[ -d "$1" ]]; }
+is_file() { [[ -f "$1" ]]; }
 
-[ -n "$AUDIO_BITRATE" ] && CMD+=(-b:a "$AUDIO_BITRATE")
+cleanup_temp() {
+    if [[ "$1" == "$2" ]]; then
+        echo "ℹ️ Skipping cleanup: same as original input."
+    elif [[ -f "$1" ]]; then
+        rm "$1"
+    fi
+}
 
-# Map subtitle streams and set language
-for i in "${!SUBS[@]}"; do
-  CMD+=(-map $((i + 2)):s:0 -c:s:$i srt -metadata:s:s:$i language=eng)
+CONFIG_FILE=""
+if [[ "$NO_CONFIG" == false ]]; then
+    if [[ -f "$(dirname "$0")/import_audio.conf" ]]; then
+        CONFIG_FILE="$(dirname "$0")/import_audio.conf"
+    elif [[ -f "$HOME/.config/ad-tools/import_audio.conf" ]]; then
+        CONFIG_FILE="$HOME/.config/ad-tools/import_audio.conf"
+    fi
+
+    if [[ -n "$CONFIG_FILE" ]]; then
+        echo "[🔧] Loading config: $CONFIG_FILE"
+        source "$CONFIG_FILE"
+    else
+        echo "[ℹ️] No config file found."
+    fi
+else
+    echo "[⚠️] Config file loading disabled."
+fi
+
+get_default_flag() {
+    [[ "$MODE" == "add" && "$SET_AD_DEFAULT" =~ ^[Yy]$ ]] && echo "-disposition:a:1 default"
+}
+
+prompt_codec_and_bitrate() {
+    echo
+    read -p "Choose audio codec (wav/aac/eac3) [default=${CODEC:-eac3}]: " c
+    CODEC="${c:-$CODEC}"
+
+    case "$CODEC" in
+        wav) EXT="wav" ;;
+        aac) EXT="aac" ;;
+        eac3) EXT="eac3" ;;
+        *) echo "❌ Invalid codec."; exit 1 ;;
+    esac
+
+    echo
+    if [[ "$CODEC" == "eac3" ]]; then
+        echo "Recommended bitrates: 224k (stereo), 640k (5.1 surround)"
+    elif [[ "$CODEC" == "aac" ]]; then
+        echo "Recommended bitrates: 128k (stereo), 384k (5.1 surround)"
+    fi
+
+    if [[ "$CODEC" != "wav" ]]; then
+        read -p "Set audio bitrate (e.g., 224k) [leave blank for smart default]: " USER_BITRATE
+    else
+        USER_BITRATE=""
+    fi
+}
+
+prompt_muxing_settings() {
+    echo
+    read -p "What would you like to do with the audio? (add/replace) [default=${MODE:-replace}]: " m
+    MODE="${m:-$MODE}"
+
+    echo
+    DEFAULT_CONTAINER="${CONTAINER:-mkv}"
+    read -p "Select container (mp4/mkv) [default=$DEFAULT_CONTAINER]: " cont
+    CONTAINER="${cont:-$DEFAULT_CONTAINER}"
+    [[ "$CONTAINER" == "mp4" && "$CODEC" != "aac" ]] && echo "⚠️ Forcing MKV due to codec" && CONTAINER="mkv"
+
+    echo
+    read -p "Strip marker chapters from audio? (Y/N) [default=${STRIP_MARKERS:-Y}]: " sm
+    STRIP_MARKERS="${sm:-$STRIP_MARKERS}"
+
+    if [[ "$MODE" == "add" ]]; then
+        read -p "Set AD as default audio? (Y/N) [default=${SET_AD_DEFAULT:-N}]: " d
+        SET_AD_DEFAULT="${d:-$SET_AD_DEFAULT}"
+        DEFAULT_FLAG=$(get_default_flag)
+    fi
+
+    echo
+    read -p "Copy subtitle tracks from original video? (Y/N) [default=${COPY_SUBTITLES:-Y}]: " cs
+    COPY_SUBTITLES="${cs:-$COPY_SUBTITLES}"
+}
+
+prompt_settings() {
+    prompt_codec_and_bitrate
+    [[ "$AUDIO_ONLY" == false ]] && prompt_muxing_settings
+}
+
+process_pair() {
+    local VIDEO="$1"
+    local AUDIO="$2"
+    local OUTDIR="$3"
+    local BASENAME=$(basename "${VIDEO%.*}")
+    local EXTENSION="${VIDEO##*.}"
+    local OUTFILE_SUFFIX="_with_AD"
+    [[ "$MODE" == "replace" ]] && OUTFILE_SUFFIX="_replaced_audio"
+    local OUTFILE="${OUTDIR}/${BASENAME}${OUTFILE_SUFFIX}.${CONTAINER}"
+
+    local CLEAN_INPUT="${OUTDIR}/${BASENAME}_cleaned_input.${CONTAINER}"
+    local SUBS_TEMP_DIR
+    SUBS_TEMP_DIR=$(mktemp -d)
+
+    declare -a SUB_MAPS
+    declare -a SUB_ARGS
+    declare -a SUB_CODEC_ARGS
+
+    if [[ "$COPY_SUBTITLES" =~ ^[Yy]$ ]]; then
+        local sub_index=0
+        while IFS= read -r codec; do
+            local lang="$(ffprobe -v error -select_streams s:$sub_index \
+                -show_entries stream_tags=language -of default=nokey=1:noprint_wrappers=1 "$VIDEO" | head -n1)"
+            local sub_file="${SUBS_TEMP_DIR}/sub${sub_index}.srt"
+
+            if [[ "$CONTAINER" == "mp4" && "$codec" != "mov_text" ]]; then
+                echo "⚠️ Subtitle codec '$codec' not supported in MP4. Skipping stream $sub_index."
+            elif [[ "$CONTAINER" == "mp4" ]]; then
+                SUB_MAPS+=("-map 0:s:$sub_index")
+                SUB_CODEC_ARGS+=("-c:s:$sub_index" "mov_text")
+            else
+                ffmpeg -y -i "$VIDEO" -map 0:s:$sub_index "$sub_file" >/dev/null 2>&1
+                if [[ -f "$sub_file" ]]; then
+                    SUB_ARGS+=("-sub_charenc" "UTF-8" "-i" "$sub_file")
+                    SUB_CODEC_ARGS+=("-c:s:$sub_index" "srt")
+                fi
+            fi
+            ((sub_index++))
+        done < <(ffprobe -v error -select_streams s -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$VIDEO")
+    fi
+
+    if [[ "$EXTENSION" == "mp4" && "$CONTAINER" == "mp4" ]]; then
+        ffmpeg -y -i "$VIDEO" -map 0:v -map 0:a -c copy "$CLEAN_INPUT" >/dev/null 2>&1 || {
+            echo "❌ Failed to clean MP4 input."
+            return 1
+        }
+    else
+        CLEAN_INPUT="$VIDEO"
+    fi
+
+    CHANNELS=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels \
+        -of default=nokey=1:noprint_wrappers=1 "$AUDIO")
+    [[ -z "$CHANNELS" ]] && CHANNELS=2
+    [[ -z "$USER_BITRATE" && "$CODEC" != "wav" ]] && USER_BITRATE=$([[ "$CHANNELS" -ge 6 ]] && echo "640k" || echo "224k")
+
+    echo
+    echo "🎬 $(basename "$VIDEO") ⇄ $(basename "$AUDIO") → $OUTFILE"
+
+    if [[ "$MODE" == "add" ]]; then
+        ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" "${SUB_ARGS[@]}" \
+            -map 0:v:0 -map 0:a:0 -map 1:a:0 "${SUB_MAPS[@]}" \
+            -c:v copy -c:a copy -c:a:1 "$CODEC" -b:a:1 "$USER_BITRATE" \
+            ${DEFAULT_FLAG:+-disposition:a:1 default} "${SUB_CODEC_ARGS[@]}" "$OUTFILE"
+    else
+        ffmpeg -y -i "$CLEAN_INPUT" -i "$AUDIO" "${SUB_ARGS[@]}" \
+            -map 0:v:0 -map 1:a:0 "${SUB_MAPS[@]}" \
+            -c:v copy -c:a "$CODEC" -b:a "$USER_BITRATE" "${SUB_CODEC_ARGS[@]}" "$OUTFILE"
+    fi
+
+    cleanup_temp "$CLEAN_INPUT" "$VIDEO"
+    [[ -d "$SUBS_TEMP_DIR" ]] && rm -rf "$SUBS_TEMP_DIR"
+}
+
+if [[ "$AUDIO_ONLY" == true ]]; then
+    is_file "$INPUT1" || { echo "❌ You must provide an audio file."; exit 1; }
+    prompt_settings
+    process_audio_only "$INPUT1" "$(dirname "$INPUT1")"
+    echo
+    echo "✅ Audio-only re-encode complete."
+    exit 0
+fi
+
+if is_file "$INPUT1" && is_file "$INPUT2"; then
+    MODE_TYPE="single"
+elif is_directory "$INPUT1" && is_directory "$INPUT2"; then
+    MODE_TYPE="batch"
+else
+    echo "❌ Invalid input types."
+    print_usage
+fi
+
+if [[ "$MODE_TYPE" == "single" ]]; then
+    prompt_settings
+    process_pair "$INPUT1" "$INPUT2" "$(dirname "$INPUT1")"
+    echo
+    echo "✅ Single mux complete."
+    exit 0
+fi
+
+VIDEO_FILES=()
+AUDIO_FILES=()
+while IFS= read -r -d '' file; do VIDEO_FILES+=("$file"); done < <(find "$INPUT1" -type f -print0 | sort -zV)
+while IFS= read -r -d '' file; do AUDIO_FILES+=("$file"); done < <(find "$INPUT2" -type f -print0 | sort -zV)
+
+NUM_VID=${#VIDEO_FILES[@]}
+NUM_AUD=${#AUDIO_FILES[@]}
+PAIRS=$((NUM_VID<NUM_AUD ? NUM_VID : NUM_AUD))
+
+echo
+echo "🧾 Pairing:"
+for ((i=0; i<PAIRS; i++)); do
+    echo "  [$((i+1))] $(basename "${VIDEO_FILES[$i]}") ⇄ $(basename "${AUDIO_FILES[$i]}")"
 done
 
-CMD+=("$OUTPUT_FILE")
+echo
+read -p "Proceed with these $PAIRS pairs? [Y/n]: " CONFIRM
+[[ "$CONFIRM" =~ ^[Nn]$ ]] && echo "Cancelled." && exit 1
 
-echo -e "\n🎬 ${INPUT_VIDEO} ⇄ ${INPUT_AUDIO} → ${OUTPUT_FILE}"
-"${CMD[@]}"
+prompt_settings
 
-echo -e "\n✅ Single mux complete."
+for ((i=0; i<PAIRS; i++)); do
+    process_pair "${VIDEO_FILES[$i]}" "${AUDIO_FILES[$i]}" "$OUTPUT_DIR"
+done
 
-# Optional cleanup
-rm -r "$TMP_DIR"
+echo
+echo "✅ Batch complete."
