@@ -12,7 +12,7 @@ zipfile="$1"
 outdir="${zipfile%.zip}"
 
 echo "Extracting: $zipfile"
-unzip -q "$zipfile" -d "$(dirname "$zipfile")"
+unzip "$zipfile" -d "$(dirname "$zipfile")"
 
 if [ -d "$outdir" ]; then
   echo "✅  Extracted to: $outdir"
