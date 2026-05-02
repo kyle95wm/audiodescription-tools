@@ -25,7 +25,7 @@ def generate_youtube_info(title_line, subtitle_line, footer_line):
 
 ❗ This video is not affiliated with the rights holders or distributors. No video or original audio is included—this is an accessibility resource only.
 
-🎙️ Narrated and produced by: [Your Name]
+🎙️ Narrated and produced by:Kyle Warwick-Mathieu]
 🎧 Mixed for headphone playback
 
 📅 This track was originally recorded on [Insert Date Here]
@@ -98,7 +98,7 @@ if __name__ == "__main__":
 
     mode = input("Run in batch mode? (y/n): ").strip().lower()
 
-    title = input("Main title (e.g. Audio Description Track): ").strip() or "Audio Description Track"
+    title = input("Main title (e.g. Audio Description Track): ").strip() or "Isolated Audio Description Track"
     footer = input("Footer (e.g. Audio Only – Sync with your own copy): ").strip() or "Audio Only – Sync with your own copy"
 
     if mode == "y":
