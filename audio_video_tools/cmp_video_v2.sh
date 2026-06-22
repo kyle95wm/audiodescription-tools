@@ -6,6 +6,7 @@ mkdir -p "cmp"
 HEIGHT=720
 INPUT=""
 ENABLE_SMPTE=0
+ORIGINAL_QUALITY=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -14,6 +15,9 @@ for arg in "$@"; do
       ;;
     --smpte)
       ENABLE_SMPTE=1
+      ;;
+    --original-quality)
+      ORIGINAL_QUALITY=1
       ;;
     --all)
       INPUT="--all"
@@ -78,7 +82,13 @@ compress_file() {
   filename="$(basename "$input_file")"
   base="${filename%.*}"
 
-  if [ "$HEIGHT" -eq 1080 ]; then
+  if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
+    if [ "$ENABLE_SMPTE" -eq 1 ]; then
+      output_file="cmp/${base}_smpte_oq.mp4"
+    else
+      output_file="cmp/${base}_oq.mp4"
+    fi
+  elif [ "$HEIGHT" -eq 1080 ]; then
     output_file="cmp/${base}_proxy_fhd.mp4"
   else
     output_file="cmp/${base}_proxy.mp4"
@@ -93,37 +103,62 @@ compress_file() {
   read -r a_stream ch < <(pick_audio_stream "$input_file")
 
   local vf_filter
-  vf_filter="scale=-1:${HEIGHT}"
+  if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
+    vf_filter=""
+  else
+    vf_filter="scale=-1:${HEIGHT}"
+  fi
 
   if [ "$ENABLE_SMPTE" -eq 1 ]; then
     local fps drawtext_filter
     fps="$(get_video_fps "$input_file")"
     drawtext_filter="drawtext=timecode='00\\:00\\:00\\:00':timecode_rate=${fps}:fontsize=h/30:fontcolor=white@0.55:box=1:boxcolor=black@0.22:boxborderw=2:shadowx=1:shadowy=1:shadowcolor=black@0.7:x=w-tw-w*0.02:y=h-th-h*0.03"
-    vf_filter="${vf_filter},${drawtext_filter}"
+    if [ -n "$vf_filter" ]; then
+      vf_filter="${vf_filter},${drawtext_filter}"
+    else
+      vf_filter="$drawtext_filter"
+    fi
     echo "  SMPTE overlay enabled (timecode_rate=${fps})"
   fi
 
-  echo "Creating ${HEIGHT}p proxy (${ch}ch, audio stream 0:${a_stream}): $input_file → $output_file"
+  if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
+    echo "Creating original-quality encode (audio stream 0:${a_stream}): $input_file → $output_file"
+  else
+    echo "Creating ${HEIGHT}p proxy (${ch}ch, audio stream 0:${a_stream}): $input_file → $output_file"
+  fi
 
   local audio_args=()
-  if [ "${ch:-2}" -ge 6 ]; then
-    audio_args=(
-      -filter:a "pan=stereo|FL=0.707*FL+0.707*FC+0.707*BL+0.707*SL+0.5*LFE|FR=0.707*FR+0.707*FC+0.707*BR+0.707*SR+0.5*LFE"
-      -ac 2
-    )
+  local video_args=()
+  local filter_args=()
+
+  if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
+    # Keep video quality high and re-encode audio at high quality for compatibility.
+    audio_args=( -c:a aac -b:a 128k )
+    video_args=( -c:v libx264 -crf 12 -preset slow -fps_mode passthrough )
   else
-    audio_args=( -ac 2 )
+    if [ "${ch:-2}" -ge 6 ]; then
+      audio_args=(
+        -filter:a "pan=stereo|FL=0.707*FL+0.707*FC+0.707*BL+0.707*SL+0.5*LFE|FR=0.707*FR+0.707*FC+0.707*BR+0.707*SR+0.5*LFE"
+        -ac 2
+      )
+    else
+      audio_args=( -ac 2 )
+    fi
+    audio_args+=( -c:a aac -b:a 128k )
+    video_args=( -c:v libx264 -crf 18 -preset veryfast -tune fastdecode -pix_fmt yuv420p -fps_mode passthrough )
+  fi
+
+  if [ -n "$vf_filter" ]; then
+    filter_args=( -vf "$vf_filter" )
   fi
 
   ffmpeg -hide_banner -loglevel warning -stats \
     -sn \
     -i "$input_file" \
     -map 0:v:0 -map "0:${a_stream}" \
-    -vf "$vf_filter" \
-    -c:v libx264 -crf 18 -preset veryfast -tune fastdecode \
-    -pix_fmt yuv420p -fps_mode passthrough \
+    "${filter_args[@]}" \
+    "${video_args[@]}" \
     "${audio_args[@]}" \
-    -c:a aac -b:a 160k \
     "$output_file"
 }
 
@@ -143,5 +178,6 @@ else
   echo "  $0 --fhd --all      Create 1080p proxies for all videos"
   echo "  $0 --smpte <file>   Add subtle SMPTE overlay to proxy"
   echo "  $0 --smpte --all    Add subtle SMPTE overlay to all proxies"
+  echo "  $0 --smpte --original-quality <file>  Add SMPTE and preserve source quality as much as possible"
   exit 1
 fi
