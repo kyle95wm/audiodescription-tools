@@ -8,6 +8,7 @@ INPUT=""
 ENABLE_SMPTE=0
 ORIGINAL_QUALITY=0
 NO_PROXY_APPEND=0
+PRESERVE_CONTAINER=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -22,6 +23,9 @@ for arg in "$@"; do
       ;;
     --no-proxy-append|--npa)
       NO_PROXY_APPEND=1
+      ;;
+    --preserve-container)
+      PRESERVE_CONTAINER=1
       ;;
     --all)
       INPUT="--all"
@@ -82,22 +86,32 @@ compress_file() {
     return 1
   fi
 
-  local filename base output_file
+  local filename base input_ext output_ext output_file
   filename="$(basename "$input_file")"
   base="${filename%.*}"
+  if [ "$base" = "$filename" ]; then
+    input_ext=""
+  else
+    input_ext=".${filename##*.}"
+  fi
+
+  output_ext=".mp4"
+  if [ "$PRESERVE_CONTAINER" -eq 1 ] && [ -n "$input_ext" ]; then
+    output_ext="$input_ext"
+  fi
 
   if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
     if [ "$ENABLE_SMPTE" -eq 1 ]; then
-      output_file="cmp/${base}_smpte_oq.mp4"
+      output_file="cmp/${base}_smpte_oq${output_ext}"
     else
-      output_file="cmp/${base}_oq.mp4"
+      output_file="cmp/${base}_oq${output_ext}"
     fi
   elif [ "$NO_PROXY_APPEND" -eq 1 ]; then
-    output_file="cmp/${base}.mp4"
+    output_file="cmp/${base}${output_ext}"
   elif [ "$HEIGHT" -eq 1080 ]; then
-    output_file="cmp/${base}_proxy_fhd.mp4"
+    output_file="cmp/${base}_proxy_fhd${output_ext}"
   else
-    output_file="cmp/${base}_proxy.mp4"
+    output_file="cmp/${base}_proxy${output_ext}"
   fi
 
   if [ -f "$output_file" ]; then
@@ -183,6 +197,7 @@ else
   echo "  $0 <file> --fhd     Create 1080p proxy for one video"
   echo "  $0 --fhd --all      Create 1080p proxies for all videos"
   echo "  $0 --no-proxy-append|--npa <file>  Name proxy output cmp/<base>.mp4"
+  echo "  $0 --preserve-container <file>  Keep the source container extension"
   echo "  $0 --smpte <file>   Add subtle SMPTE overlay to proxy"
   echo "  $0 --smpte --all    Add subtle SMPTE overlay to all proxies"
   echo "  $0 --smpte --original-quality <file>  Add SMPTE and preserve source quality as much as possible"
