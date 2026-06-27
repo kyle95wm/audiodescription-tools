@@ -9,6 +9,10 @@ ENABLE_SMPTE=0
 ORIGINAL_QUALITY=0
 NO_PROXY_APPEND=0
 PRESERVE_CONTAINER=0
+AUTO_CONFIRM=0
+PREFLIGHT_PROCESS_COUNT=0
+PREFLIGHT_SKIP_COUNT=0
+INPUT_FILES=()
 
 for arg in "$@"; do
   case "$arg" in
@@ -27,6 +31,9 @@ for arg in "$@"; do
     --preserve-container)
       PRESERVE_CONTAINER=1
       ;;
+    --yes|--force)
+      AUTO_CONFIRM=1
+      ;;
     --all)
       INPUT="--all"
       ;;
@@ -39,7 +46,7 @@ done
 get_video_fps() {
   local input="$1"
   local fps_raw
-  fps_raw="$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=nw=1:nk=1 "$input" 2>/dev/null | head -n 1)"
+  fps_raw="$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=nw=1:nk=1 "$input" 2>/dev/null | head -n 1 || true)"
 
   if [ -z "$fps_raw" ]; then
     echo "24"
@@ -48,8 +55,150 @@ get_video_fps() {
 
   if [[ "$fps_raw" == */* ]]; then
     awk -F'/' '{ if ($2 == 0) print "24"; else printf "%.6f", $1 / $2 }' <<< "$fps_raw"
-  else
+  elif awk -v value="$fps_raw" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/) }'; then
     echo "$fps_raw"
+  else
+    echo "24"
+  fi
+}
+
+get_duration_seconds() {
+  local input="$1"
+  ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$input" 2>/dev/null | head -n 1 || true
+}
+
+get_video_dimensions() {
+  local input="$1"
+  ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$input" 2>/dev/null | head -n 1 || true
+}
+
+get_file_size_bytes() {
+  local input="$1"
+  wc -c < "$input" 2>/dev/null | tr -d '[:space:]' || true
+}
+
+format_bytes() {
+  local bytes="${1:-}"
+
+  if [ -z "$bytes" ]; then
+    echo "unknown"
+    return
+  fi
+
+  awk -v bytes="$bytes" '
+    BEGIN {
+      split("B KB MB GB TB", units, " ")
+      value = bytes + 0
+      unit = 1
+      while (value >= 1024 && unit < 5) {
+        value /= 1024
+        unit++
+      }
+      if (unit == 1) {
+        printf "%.0f %s", value, units[unit]
+      } else {
+        printf "%.1f %s", value, units[unit]
+      }
+    }
+  '
+}
+
+format_duration() {
+  local seconds="${1:-}"
+
+  if [ -z "$seconds" ] || ! awk -v value="$seconds" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/) }'; then
+    echo "unknown"
+    return
+  fi
+
+  awk -v value="$seconds" '
+    BEGIN {
+      total = int(value + 0.5)
+      hours = int(total / 3600)
+      minutes = int((total % 3600) / 60)
+      secs = total % 60
+      printf "%02d:%02d:%02d", hours, minutes, secs
+    }
+  '
+}
+
+yes_no() {
+  if [ "${1:-0}" -eq 1 ]; then
+    echo "yes"
+  else
+    echo "no"
+  fi
+}
+
+describe_mode() {
+  if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
+    echo "Original-quality re-encode"
+  else
+    echo "${HEIGHT}p proxy"
+  fi
+}
+
+describe_video_settings() {
+  if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
+    echo "libx264 CRF 12, preset slow, source resolution"
+  else
+    echo "libx264 CRF 18, preset veryfast, scale to ${HEIGHT}p"
+  fi
+}
+
+describe_output_container() {
+  if [ "$PRESERVE_CONTAINER" -eq 1 ]; then
+    echo "preserve source extension"
+  else
+    echo "mp4"
+  fi
+}
+
+describe_output_naming() {
+  if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
+    if [ "$ENABLE_SMPTE" -eq 1 ]; then
+      echo "<base>_smpte_oq<ext>"
+    else
+      echo "<base>_oq<ext>"
+    fi
+  elif [ "$NO_PROXY_APPEND" -eq 1 ]; then
+    echo "<base><ext>"
+  elif [ "$HEIGHT" -eq 1080 ]; then
+    echo "<base>_proxy_fhd<ext>"
+  else
+    echo "<base>_proxy<ext>"
+  fi
+}
+
+get_output_file() {
+  local input_file="$1"
+  local filename base input_ext output_ext
+
+  filename="$(basename "$input_file")"
+  base="${filename%.*}"
+  if [ "$base" = "$filename" ]; then
+    input_ext=""
+  else
+    input_ext=".${filename##*.}"
+  fi
+
+  output_ext=".mp4"
+  if [ "$PRESERVE_CONTAINER" -eq 1 ] && [ -n "$input_ext" ]; then
+    output_ext="$input_ext"
+  fi
+
+  if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
+    if [ "$ENABLE_SMPTE" -eq 1 ]; then
+      echo "cmp/${base}_smpte_oq${output_ext}"
+    else
+      echo "cmp/${base}_oq${output_ext}"
+    fi
+  elif [ "$NO_PROXY_APPEND" -eq 1 ]; then
+    echo "cmp/${base}${output_ext}"
+  elif [ "$HEIGHT" -eq 1080 ]; then
+    echo "cmp/${base}_proxy_fhd${output_ext}"
+  else
+    echo "cmp/${base}_proxy${output_ext}"
   fi
 }
 
@@ -78,6 +227,219 @@ pick_audio_stream() {
   echo "$chosen" | awk -F',' '{print $1, $2}'
 }
 
+estimate_output_size_bytes() {
+  local input_file="$1"
+  local duration source_size dims source_w source_h fps target_width
+  local estimate_bytes
+
+  duration="$(get_duration_seconds "$input_file")"
+  if ! awk -v value="$duration" 'BEGIN { exit !((value + 0) > 0) }'; then
+    echo ""
+    return
+  fi
+
+  source_size="$(get_file_size_bytes "$input_file")"
+  if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
+    echo "$source_size"
+    return
+  fi
+
+  dims="$(get_video_dimensions "$input_file")"
+  if [[ "$dims" == *x* ]]; then
+    source_w="${dims%x*}"
+    source_h="${dims#*x}"
+  else
+    source_w=$((HEIGHT * 16 / 9))
+    source_h="$HEIGHT"
+  fi
+
+  fps="$(get_video_fps "$input_file")"
+  target_width="$(awk -v sw="$source_w" -v sh="$source_h" -v th="$HEIGHT" '
+    BEGIN {
+      if ((sh + 0) <= 0) {
+        width = th * 16 / 9
+      } else {
+        width = sw * th / sh
+      }
+      width = int((width + 1) / 2) * 2
+      if (width < 2) {
+        width = 2
+      }
+      printf "%.0f", width
+    }
+  ')"
+
+  estimate_bytes="$(awk -v tw="$target_width" -v th="$HEIGHT" -v fps="$fps" -v duration="$duration" '
+    BEGIN {
+      bpp = 0.075
+      video_kbps = tw * th * fps * bpp / 1000
+      if (th <= 720) {
+        if (video_kbps < 1200) video_kbps = 1200
+        if (video_kbps > 4500) video_kbps = 4500
+      } else {
+        if (video_kbps < 2500) video_kbps = 2500
+        if (video_kbps > 9500) video_kbps = 9500
+      }
+      total_kbps = video_kbps + 128
+      printf "%.0f", duration * total_kbps * 1000 / 8
+    }
+  ')"
+
+  echo "$estimate_bytes"
+}
+
+collect_input_files() {
+  INPUT_FILES=()
+
+  if [ "$INPUT" = "--all" ]; then
+    shopt -s nullglob
+    INPUT_FILES=( *.mkv *.mp4 *.mov *.m4v )
+    shopt -u nullglob
+  elif [ -n "$INPUT" ]; then
+    INPUT_FILES=( "$INPUT" )
+  fi
+}
+
+validate_input_files() {
+  local input_file
+  local missing=0
+
+  for input_file in "${INPUT_FILES[@]}"; do
+    if [ ! -f "$input_file" ]; then
+      echo "File not found: $input_file"
+      missing=1
+    fi
+  done
+
+  if [ "$missing" -eq 1 ]; then
+    exit 1
+  fi
+}
+
+print_preflight_summary() {
+  local input_file output_file source_bytes duration estimate_bytes output_bytes
+  local total_source_bytes=0
+  local total_estimated_bytes=0
+  local total_duration_seconds=0
+  local rounded_duration
+  local status
+
+  PREFLIGHT_PROCESS_COUNT=0
+  PREFLIGHT_SKIP_COUNT=0
+
+  echo
+  echo "Overview"
+  echo "--------"
+  echo "Mode: $(describe_mode)"
+  echo "Video: $(describe_video_settings)"
+  echo "Audio: AAC 128k stereo"
+  echo "SMPTE overlay: $(yes_no "$ENABLE_SMPTE")"
+  echo "Preserve container: $(yes_no "$PRESERVE_CONTAINER")"
+  echo "Output container: $(describe_output_container)"
+  echo "Output naming: $(describe_output_naming)"
+  echo "Matched files: ${#INPUT_FILES[@]}"
+  echo
+
+  for input_file in "${INPUT_FILES[@]}"; do
+    output_file="$(get_output_file "$input_file")"
+    source_bytes="$(get_file_size_bytes "$input_file")"
+    duration="$(get_duration_seconds "$input_file")"
+    estimate_bytes="$(estimate_output_size_bytes "$input_file")"
+    status="CREATE"
+
+    if [ -f "$output_file" ]; then
+      status="SKIP"
+      PREFLIGHT_SKIP_COUNT=$((PREFLIGHT_SKIP_COUNT + 1))
+      output_bytes="$(get_file_size_bytes "$output_file")"
+    else
+      PREFLIGHT_PROCESS_COUNT=$((PREFLIGHT_PROCESS_COUNT + 1))
+      output_bytes=""
+    fi
+
+    if [ -n "$source_bytes" ]; then
+      total_source_bytes=$((total_source_bytes + source_bytes))
+    fi
+
+    if awk -v value="$duration" 'BEGIN { exit !((value + 0) > 0) }'; then
+      rounded_duration="$(awk -v value="$duration" 'BEGIN { printf "%.0f", value }')"
+      total_duration_seconds=$((total_duration_seconds + rounded_duration))
+    fi
+
+    if [ "$status" = "CREATE" ] && [ -n "$estimate_bytes" ]; then
+      total_estimated_bytes=$((total_estimated_bytes + estimate_bytes))
+    fi
+
+    echo "[$status] $input_file"
+    echo "  source: $(format_bytes "$source_bytes") | duration: $(format_duration "$duration")"
+    echo "  output: $output_file"
+
+    if [ "$status" = "SKIP" ] && [ -n "$output_bytes" ]; then
+      echo "  output size: $(format_bytes "$output_bytes") (existing)"
+    elif [ -n "$estimate_bytes" ]; then
+      echo "  estimated output: $(format_bytes "$estimate_bytes")"
+    else
+      echo "  estimated output: unknown"
+    fi
+  done
+
+  echo
+  echo "Summary"
+  echo "-------"
+  echo "To process: $PREFLIGHT_PROCESS_COUNT file(s)"
+  echo "Skipping existing outputs: $PREFLIGHT_SKIP_COUNT file(s)"
+  echo "Total input duration: $(format_duration "$total_duration_seconds")"
+  echo "Total source size: $(format_bytes "$total_source_bytes")"
+
+  if [ "$PREFLIGHT_PROCESS_COUNT" -gt 0 ]; then
+    echo "Estimated new output size: $(format_bytes "$total_estimated_bytes")"
+  fi
+
+  if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
+    echo "Estimate note: original-quality size estimates are based on source file sizes and may vary with content."
+  else
+    echo "Estimate note: proxy size estimates are rough and based on duration, frame rate, target resolution, and 128k AAC audio."
+  fi
+
+  echo
+}
+
+confirm_preflight() {
+  local reply
+
+  print_preflight_summary
+
+  if [ "$PREFLIGHT_PROCESS_COUNT" -eq 0 ]; then
+    echo "Nothing to process."
+    exit 0
+  fi
+
+  if [ "$AUTO_CONFIRM" -eq 1 ]; then
+    echo "Auto-confirm enabled; starting processing."
+    return
+  fi
+
+  if [ ! -t 0 ]; then
+    echo "Interactive confirmation is required. Re-run with --yes to skip the prompt."
+    exit 1
+  fi
+
+  printf "Proceed with processing? [y/N] "
+  if ! read -r reply; then
+    echo
+    echo "Cancelled."
+    exit 0
+  fi
+
+  case "$reply" in
+    [Yy]|[Yy][Ee][Ss])
+      ;;
+    *)
+      echo "Cancelled."
+      exit 0
+      ;;
+  esac
+}
+
 compress_file() {
   local input_file="$1"
 
@@ -86,33 +448,8 @@ compress_file() {
     return 1
   fi
 
-  local filename base input_ext output_ext output_file
-  filename="$(basename "$input_file")"
-  base="${filename%.*}"
-  if [ "$base" = "$filename" ]; then
-    input_ext=""
-  else
-    input_ext=".${filename##*.}"
-  fi
-
-  output_ext=".mp4"
-  if [ "$PRESERVE_CONTAINER" -eq 1 ] && [ -n "$input_ext" ]; then
-    output_ext="$input_ext"
-  fi
-
-  if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
-    if [ "$ENABLE_SMPTE" -eq 1 ]; then
-      output_file="cmp/${base}_smpte_oq${output_ext}"
-    else
-      output_file="cmp/${base}_oq${output_ext}"
-    fi
-  elif [ "$NO_PROXY_APPEND" -eq 1 ]; then
-    output_file="cmp/${base}${output_ext}"
-  elif [ "$HEIGHT" -eq 1080 ]; then
-    output_file="cmp/${base}_proxy_fhd${output_ext}"
-  else
-    output_file="cmp/${base}_proxy${output_ext}"
-  fi
+  local output_file
+  output_file="$(get_output_file "$input_file")"
 
   if [ -f "$output_file" ]; then
     echo "Skipping $input_file (proxy exists)"
@@ -182,14 +519,7 @@ compress_file() {
     "$output_file"
 }
 
-if [ "$INPUT" == "--all" ]; then
-  shopt -s nullglob
-  for file in *.mkv *.mp4 *.mov *.m4v; do
-    compress_file "$file"
-  done
-elif [ -n "$INPUT" ]; then
-  compress_file "$INPUT"
-else
+if [ "$INPUT" != "--all" ] && [ -z "$INPUT" ]; then
   echo "Usage:"
   echo "  $0 <file>           Create 720p proxy for one video"
   echo "  $0 --all            Create 720p proxies for all videos"
@@ -201,5 +531,20 @@ else
   echo "  $0 --smpte <file>   Add subtle SMPTE overlay to proxy"
   echo "  $0 --smpte --all    Add subtle SMPTE overlay to all proxies"
   echo "  $0 --smpte --original-quality <file>  Add SMPTE and preserve source quality as much as possible"
+  echo "  $0 --yes <file>     Show overview, skip prompt, and start immediately"
   exit 1
 fi
+
+collect_input_files
+
+if [ "${#INPUT_FILES[@]}" -eq 0 ]; then
+  echo "No matching video files found."
+  exit 0
+fi
+
+validate_input_files
+confirm_preflight
+
+for file in "${INPUT_FILES[@]}"; do
+  compress_file "$file"
+done
