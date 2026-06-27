@@ -10,6 +10,7 @@ ORIGINAL_QUALITY=0
 NO_PROXY_APPEND=0
 PRESERVE_CONTAINER=0
 AUTO_CONFIRM=0
+DELETE_ORIGINAL=0
 PREFLIGHT_PROCESS_COUNT=0
 PREFLIGHT_SKIP_COUNT=0
 INPUT_FILES=()
@@ -33,6 +34,9 @@ for arg in "$@"; do
       ;;
     --yes|--force)
       AUTO_CONFIRM=1
+      ;;
+    --delete-original)
+      DELETE_ORIGINAL=1
       ;;
     --all)
       INPUT="--all"
@@ -335,6 +339,7 @@ print_preflight_summary() {
   echo "Audio: AAC 128k stereo"
   echo "SMPTE overlay: $(yes_no "$ENABLE_SMPTE")"
   echo "Preserve container: $(yes_no "$PRESERVE_CONTAINER")"
+  echo "Delete originals: $(yes_no "$DELETE_ORIGINAL")"
   echo "Output container: $(describe_output_container)"
   echo "Output naming: $(describe_output_naming)"
   echo "Matched files: ${#INPUT_FILES[@]}"
@@ -400,6 +405,10 @@ print_preflight_summary() {
     echo "Estimate note: proxy size estimates are rough and based on duration, frame rate, target resolution, and 128k AAC audio."
   fi
 
+  if [ "$DELETE_ORIGINAL" -eq 1 ]; then
+    echo "Delete note: originals are removed only after a successful encode creates a non-empty output file."
+  fi
+
   echo
 }
 
@@ -423,7 +432,11 @@ confirm_preflight() {
     exit 1
   fi
 
-  printf "Proceed with processing? [y/N] "
+  if [ "$DELETE_ORIGINAL" -eq 1 ]; then
+    printf "Proceed with processing and delete originals after successful outputs? [y/N] "
+  else
+    printf "Proceed with processing? [y/N] "
+  fi
   if ! read -r reply; then
     echo
     echo "Cancelled."
@@ -517,6 +530,16 @@ compress_file() {
     "${video_args[@]}" \
     "${audio_args[@]}" \
     "$output_file"
+
+  if [ "$DELETE_ORIGINAL" -eq 1 ]; then
+    if [ -s "$output_file" ]; then
+      rm -- "$input_file"
+      echo "Deleted original: $input_file"
+    else
+      echo "Output file missing or empty after encode; original kept: $input_file"
+      return 1
+    fi
+  fi
 }
 
 if [ "$INPUT" != "--all" ] && [ -z "$INPUT" ]; then
@@ -531,6 +554,7 @@ if [ "$INPUT" != "--all" ] && [ -z "$INPUT" ]; then
   echo "  $0 --smpte <file>   Add subtle SMPTE overlay to proxy"
   echo "  $0 --smpte --all    Add subtle SMPTE overlay to all proxies"
   echo "  $0 --smpte --original-quality <file>  Add SMPTE and preserve source quality as much as possible"
+  echo "  $0 --delete-original <file>  Delete original after successful output creation"
   echo "  $0 --yes <file>     Show overview, skip prompt, and start immediately"
   exit 1
 fi
