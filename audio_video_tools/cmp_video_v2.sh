@@ -7,6 +7,7 @@ HEIGHT=720
 INPUT=""
 ENABLE_SMPTE=0
 ORIGINAL_QUALITY=0
+NO_PROXY_APPEND=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -18,6 +19,9 @@ for arg in "$@"; do
       ;;
     --original-quality)
       ORIGINAL_QUALITY=1
+      ;;
+    --no-proxy-append|--npa)
+      NO_PROXY_APPEND=1
       ;;
     --all)
       INPUT="--all"
@@ -88,6 +92,8 @@ compress_file() {
     else
       output_file="cmp/${base}_oq.mp4"
     fi
+  elif [ "$NO_PROXY_APPEND" -eq 1 ]; then
+    output_file="cmp/${base}.mp4"
   elif [ "$HEIGHT" -eq 1080 ]; then
     output_file="cmp/${base}_proxy_fhd.mp4"
   else
@@ -176,6 +182,7 @@ else
   echo "  $0 --fhd <file>     Create 1080p proxy for one video"
   echo "  $0 <file> --fhd     Create 1080p proxy for one video"
   echo "  $0 --fhd --all      Create 1080p proxies for all videos"
+  echo "  $0 --no-proxy-append|--npa <file>  Name proxy output cmp/<base>.mp4"
   echo "  $0 --smpte <file>   Add subtle SMPTE overlay to proxy"
   echo "  $0 --smpte --all    Add subtle SMPTE overlay to all proxies"
   echo "  $0 --smpte --original-quality <file>  Add SMPTE and preserve source quality as much as possible"
