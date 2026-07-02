@@ -3,7 +3,7 @@
 set -euo pipefail
 mkdir -p "cmp"
 
-SCRIPT_VERSION="1.1.1"
+SCRIPT_VERSION="1.2.0"
 # Set this to your raw GitHub script URL if you want a fixed update source.
 # Example: https://raw.githubusercontent.com/owner/repo/main/cmp_video_v2.sh
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/refs/heads/main/audio_video_tools/cmp_video_v2.sh"
@@ -22,6 +22,7 @@ DELETE_ORIGINAL=0
 SELF_UPDATE_ONLY=0
 SKIP_UPDATE=0
 SHOW_HELP=0
+INTERACTIVE_MODE=0
 PREFLIGHT_PROCESS_COUNT=0
 PREFLIGHT_SKIP_COUNT=0
 INPUT_FILES=()
@@ -48,6 +49,9 @@ for arg in "$@"; do
       ;;
     --delete-original)
       DELETE_ORIGINAL=1
+      ;;
+    --interactive)
+      INTERACTIVE_MODE=1
       ;;
     --self-update|--update)
       SELF_UPDATE_ONLY=1
@@ -201,12 +205,14 @@ cmp_video_v2.sh - Proxy/original-quality video encoder with optional SMPTE overl
 Usage:
   $0 <file>
   $0 --all
+  $0 --interactive [file]
   $0 [--fhd] [--smpte] [--no-proxy-append] [--preserve-container] [--yes] [--delete-original] <file|--all>
   $0 --original-quality [--smpte] [--preserve-container] [--yes] [--delete-original] <file|--all>
   $0 --self-update
 
 Examples:
   $0 clip.mov
+  $0 --interactive
   $0 --fhd clip.mov
   $0 --smpte --all
   $0 --original-quality --smpte interview.mkv
@@ -215,6 +221,7 @@ Examples:
 
 Options:
   --all                  Process all .mkv .mp4 .mov .m4v files in current directory
+  --interactive          Prompt for input and compatible settings in a guided menu
   --fhd                  Target 1080p proxy mode (default proxy mode is 720p)
   --original-quality     Re-encode at source resolution with high quality settings
   --smpte                Burn subtle SMPTE timecode overlay
@@ -237,6 +244,191 @@ Update Source Priority:
   2) DEFAULT_UPDATE_URL in this script
   3) Git remote-derived raw GitHub URL
 EOF
+}
+
+prompt_menu_choice() {
+  local prompt="$1"
+  local default_choice="$2"
+  shift 2
+
+  local options=("$@")
+  local reply
+
+  while true; do
+    echo "$prompt"
+    local i=1
+    for option in "${options[@]}"; do
+      if [ "$i" -eq "$default_choice" ]; then
+        printf "  %d) %s [default]\n" "$i" "$option"
+      else
+        printf "  %d) %s\n" "$i" "$option"
+      fi
+      i=$((i + 1))
+    done
+
+    printf "Choose [%s]: " "$default_choice"
+    if ! read -r reply; then
+      echo
+      echo "Cancelled."
+      exit 0
+    fi
+
+    if [ -z "$reply" ]; then
+      reply="$default_choice"
+    fi
+
+    if awk -v value="$reply" -v max="${#options[@]}" 'BEGIN { exit !(value ~ /^[0-9]+$/ && value >= 1 && value <= max) }'; then
+      echo "$reply"
+      return
+    fi
+
+    echo "Invalid selection. Enter a number from 1 to ${#options[@]}."
+    echo
+  done
+}
+
+prompt_yes_no() {
+  local prompt="$1"
+  local default_value="${2:-0}"
+  local reply
+  local default_hint="y/N"
+
+  if [ "$default_value" -eq 1 ]; then
+    default_hint="Y/n"
+  fi
+
+  while true; do
+    printf "%s [%s] " "$prompt" "$default_hint"
+    if ! read -r reply; then
+      echo
+      echo "Cancelled."
+      exit 0
+    fi
+
+    if [ -z "$reply" ]; then
+      echo "$default_value"
+      return
+    fi
+
+    case "$reply" in
+      [Yy]|[Yy][Ee][Ss])
+        echo "1"
+        return
+        ;;
+      [Nn]|[Nn][Oo])
+        echo "0"
+        return
+        ;;
+    esac
+
+    echo "Please answer y or n."
+  done
+}
+
+prompt_input_file() {
+  local default_value="$1"
+  local reply
+
+  while true; do
+    if [ -n "$default_value" ]; then
+      printf "Input file [%s]: " "$default_value"
+    else
+      printf "Input file: "
+    fi
+
+    if ! read -r reply; then
+      echo
+      echo "Cancelled."
+      exit 0
+    fi
+
+    if [ -z "$reply" ]; then
+      reply="$default_value"
+    fi
+
+    if [ -n "$reply" ]; then
+      echo "$reply"
+      return
+    fi
+
+    echo "Enter a file path or press Ctrl+C to cancel."
+  done
+}
+
+run_interactive_setup() {
+  local selection
+
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    echo "Error: --interactive requires a terminal."
+    exit 1
+  fi
+
+  echo
+  echo "Interactive setup"
+  echo "-----------------"
+
+  if [ "$INPUT" = "--all" ]; then
+    selection=2
+  elif [ -n "$INPUT" ]; then
+    selection=1
+  else
+    selection=1
+  fi
+
+  selection="$(prompt_menu_choice "Choose input source:" "$selection" "Single file" "All supported files in current directory")"
+  if [ "$selection" -eq 1 ]; then
+    INPUT="$(prompt_input_file "$INPUT")"
+  else
+    INPUT="--all"
+  fi
+  echo
+
+  if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
+    selection=3
+  elif [ "$HEIGHT" -eq 1080 ]; then
+    selection=2
+  else
+    selection=1
+  fi
+
+  selection="$(prompt_menu_choice "Choose encode mode:" "$selection" "720p proxy" "1080p proxy" "Original-quality re-encode")"
+  case "$selection" in
+    1)
+      ORIGINAL_QUALITY=0
+      HEIGHT=720
+      ;;
+    2)
+      ORIGINAL_QUALITY=0
+      HEIGHT=1080
+      ;;
+    3)
+      ORIGINAL_QUALITY=1
+      ;;
+  esac
+
+  ENABLE_SMPTE="$(prompt_yes_no "Burn SMPTE overlay?" "$ENABLE_SMPTE")"
+  PRESERVE_CONTAINER="$(prompt_yes_no "Preserve source container extension?" "$PRESERVE_CONTAINER")"
+
+  if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
+    NO_PROXY_APPEND=0
+    echo
+    echo "Output naming is fixed to original-quality suffixes in original-quality mode."
+  else
+    echo
+    selection=1
+    if [ "$NO_PROXY_APPEND" -eq 1 ]; then
+      selection=2
+    fi
+    selection="$(prompt_menu_choice "Choose output naming:" "$selection" "Add proxy suffix" "Keep base name without proxy suffix")"
+    if [ "$selection" -eq 2 ]; then
+      NO_PROXY_APPEND=1
+    else
+      NO_PROXY_APPEND=0
+    fi
+  fi
+
+  DELETE_ORIGINAL="$(prompt_yes_no "Delete originals after successful encode?" "$DELETE_ORIGINAL")"
+  AUTO_CONFIRM="$(prompt_yes_no "Skip the final confirmation prompt?" "$AUTO_CONFIRM")"
 }
 
 get_video_fps() {
@@ -739,13 +931,6 @@ if [ "$SHOW_HELP" -eq 1 ] || [ "${#ORIGINAL_ARGS[@]}" -eq 0 ]; then
   exit 0
 fi
 
-if [ "$SELF_UPDATE_ONLY" -ne 1 ] && [ "$INPUT" != "--all" ] && [ -z "$INPUT" ]; then
-  echo "Error: missing input file or --all."
-  echo
-  print_help
-  exit 1
-fi
-
 if [ "$SKIP_UPDATE" -eq 0 ]; then
   set +e
   self_update_if_needed
@@ -765,6 +950,17 @@ fi
 
 if [ "$SELF_UPDATE_ONLY" -eq 1 ]; then
   exit 0
+fi
+
+if [ "$INTERACTIVE_MODE" -eq 1 ]; then
+  run_interactive_setup
+fi
+
+if [ "$INPUT" != "--all" ] && [ -z "$INPUT" ]; then
+  echo "Error: missing input file or --all."
+  echo
+  print_help
+  exit 1
 fi
 
 collect_input_files
