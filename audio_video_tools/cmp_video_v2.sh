@@ -3,7 +3,7 @@
 set -euo pipefail
 mkdir -p "cmp"
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 # Set this to your raw GitHub script URL if you want a fixed update source.
 # Example: https://raw.githubusercontent.com/owner/repo/main/cmp_video_v2.sh
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/refs/heads/main/audio_video_tools/cmp_video_v2.sh"
@@ -255,21 +255,21 @@ prompt_menu_choice() {
   local reply
 
   while true; do
-    echo "$prompt"
+    echo "$prompt" >&2
     local i=1
     for option in "${options[@]}"; do
       if [ "$i" -eq "$default_choice" ]; then
-        printf "  %d) %s [default]\n" "$i" "$option"
+        printf "  %d) %s [default]\n" "$i" "$option" >&2
       else
-        printf "  %d) %s\n" "$i" "$option"
+        printf "  %d) %s\n" "$i" "$option" >&2
       fi
       i=$((i + 1))
     done
 
-    printf "Choose [%s]: " "$default_choice"
+    printf "Choose [%s]: " "$default_choice" >&2
     if ! read -r reply; then
-      echo
-      echo "Cancelled."
+      echo >&2
+      echo "Cancelled." >&2
       exit 0
     fi
 
@@ -282,8 +282,8 @@ prompt_menu_choice() {
       return
     fi
 
-    echo "Invalid selection. Enter a number from 1 to ${#options[@]}."
-    echo
+    echo "Invalid selection. Enter a number from 1 to ${#options[@]}." >&2
+    echo >&2
   done
 }
 
@@ -298,10 +298,10 @@ prompt_yes_no() {
   fi
 
   while true; do
-    printf "%s [%s] " "$prompt" "$default_hint"
+    printf "%s [%s] " "$prompt" "$default_hint" >&2
     if ! read -r reply; then
-      echo
-      echo "Cancelled."
+      echo >&2
+      echo "Cancelled." >&2
       exit 0
     fi
 
@@ -321,7 +321,7 @@ prompt_yes_no() {
         ;;
     esac
 
-    echo "Please answer y or n."
+    echo "Please answer y or n." >&2
   done
 }
 
@@ -331,14 +331,14 @@ prompt_input_file() {
 
   while true; do
     if [ -n "$default_value" ]; then
-      printf "Input file [%s]: " "$default_value"
+      printf "Input file [%s]: " "$default_value" >&2
     else
-      printf "Input file: "
+      printf "Input file: " >&2
     fi
 
     if ! read -r reply; then
-      echo
-      echo "Cancelled."
+      echo >&2
+      echo "Cancelled." >&2
       exit 0
     fi
 
@@ -351,7 +351,7 @@ prompt_input_file() {
       return
     fi
 
-    echo "Enter a file path or press Ctrl+C to cancel."
+    echo "Enter a file path or press Ctrl+C to cancel." >&2
   done
 }
 
