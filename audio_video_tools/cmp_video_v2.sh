@@ -3,6 +3,14 @@
 set -euo pipefail
 mkdir -p "cmp"
 
+SCRIPT_VERSION="1.1.0"
+# Set this to your raw GitHub script URL if you want a fixed update source.
+# Example: https://raw.githubusercontent.com/owner/repo/main/cmp_video_v2.sh
+DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/refs/heads/main/audio_video_tools/cmp_video_v2.sh"
+ORIGINAL_ARGS=("$@")
+SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/${SCRIPT_NAME}"
+
 HEIGHT=720
 INPUT=""
 ENABLE_SMPTE=0
@@ -11,6 +19,8 @@ NO_PROXY_APPEND=0
 PRESERVE_CONTAINER=0
 AUTO_CONFIRM=0
 DELETE_ORIGINAL=0
+SELF_UPDATE_ONLY=0
+SKIP_UPDATE=0
 PREFLIGHT_PROCESS_COUNT=0
 PREFLIGHT_SKIP_COUNT=0
 INPUT_FILES=()
@@ -38,6 +48,12 @@ for arg in "$@"; do
     --delete-original)
       DELETE_ORIGINAL=1
       ;;
+    --self-update|--update)
+      SELF_UPDATE_ONLY=1
+      ;;
+    --no-update|--skip-update)
+      SKIP_UPDATE=1
+      ;;
     --all)
       INPUT="--all"
       ;;
@@ -46,6 +62,133 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+resolve_update_url() {
+  if [ -n "${CMP_VIDEO_UPDATE_URL:-}" ]; then
+    echo "$CMP_VIDEO_UPDATE_URL"
+    return
+  fi
+
+  if [ -n "$DEFAULT_UPDATE_URL" ]; then
+    echo "$DEFAULT_UPDATE_URL"
+    return
+  fi
+
+  local script_dir remote_url owner_repo default_branch
+  script_dir="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+
+  remote_url="$(git -C "$script_dir" config --get remote.origin.url 2>/dev/null || true)"
+  if [ -z "$remote_url" ]; then
+    return
+  fi
+
+  owner_repo="$(echo "$remote_url" | sed -E 's#^git@github.com:([^ ]+)\.git$#\1#; s#^https://github.com/([^ ]+)\.git$#\1#; s#^https://github.com/([^ ]+)$#\1#')"
+  if [ -z "$owner_repo" ] || [ "$owner_repo" = "$remote_url" ]; then
+    return
+  fi
+
+  default_branch="$(git -C "$script_dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
+  if [ -z "$default_branch" ]; then
+    default_branch="main"
+  fi
+
+  echo "https://raw.githubusercontent.com/${owner_repo}/${default_branch}/${SCRIPT_NAME}"
+}
+
+extract_version_from_file() {
+  local file_path="$1"
+  awk -F'"' '/^SCRIPT_VERSION="[0-9]+([.][0-9]+)*"/ { print $2; exit }' "$file_path" 2>/dev/null || true
+}
+
+is_newer_version() {
+  local candidate="${1#v}"
+  local current="${2#v}"
+
+  awk -v candidate="$candidate" -v current="$current" '
+    BEGIN {
+      candidate_n = split(candidate, a, ".")
+      current_n = split(current, b, ".")
+      max_n = (candidate_n > current_n) ? candidate_n : current_n
+
+      for (i = 1; i <= max_n; i++) {
+        av = (i <= candidate_n) ? (a[i] + 0) : 0
+        bv = (i <= current_n) ? (b[i] + 0) : 0
+        if (av > bv) {
+          print "1"
+          exit
+        }
+        if (av < bv) {
+          print "0"
+          exit
+        }
+      }
+
+      print "0"
+    }
+  '
+}
+
+install_updated_script() {
+  local downloaded_file="$1"
+  local backup_path
+
+  backup_path="${SCRIPT_PATH}.bak"
+  cp -f "$SCRIPT_PATH" "$backup_path"
+  install -m 0755 "$downloaded_file" "$SCRIPT_PATH"
+}
+
+self_update_if_needed() {
+  local update_url fetched_url temp_file remote_version
+
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "Update check skipped: curl is not installed."
+    return 0
+  fi
+
+  update_url="$(resolve_update_url)"
+  if [ -z "$update_url" ]; then
+    echo "Update check skipped: unable to resolve GitHub update URL."
+    echo "Set CMP_VIDEO_UPDATE_URL to your raw script URL to enable updates."
+    return 0
+  fi
+
+  temp_file="$(mktemp "${TMPDIR:-/tmp}/cmp_video_v2_update.XXXXXX")"
+  fetched_url="${update_url}"
+  if [[ "$fetched_url" == *\?* ]]; then
+    fetched_url="${fetched_url}&ts=$(date +%s)"
+  else
+    fetched_url="${fetched_url}?ts=$(date +%s)"
+  fi
+
+  if ! curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' "$fetched_url" -o "$temp_file"; then
+    rm -f "$temp_file"
+    echo "Update check failed: could not download latest script from GitHub."
+    return 0
+  fi
+
+  remote_version="$(extract_version_from_file "$temp_file")"
+  if [ -z "$remote_version" ]; then
+    rm -f "$temp_file"
+    echo "Update check failed: downloaded script has no readable SCRIPT_VERSION."
+    return 0
+  fi
+
+  if [ "$(is_newer_version "$remote_version" "$SCRIPT_VERSION")" = "1" ]; then
+    echo "Updating ${SCRIPT_NAME} from ${SCRIPT_VERSION} to ${remote_version}"
+    if install_updated_script "$temp_file"; then
+      rm -f "$temp_file"
+      return 10
+    else
+      rm -f "$temp_file"
+      echo "Update install failed; keeping current script."
+      return 0
+    fi
+  fi
+
+  rm -f "$temp_file"
+  echo "Already up to date (${SCRIPT_VERSION})."
+  return 0
+}
 
 get_video_fps() {
   local input="$1"
@@ -144,9 +287,9 @@ describe_mode() {
 
 describe_video_settings() {
   if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
-    echo "libx264 CRF 12, preset slow, source resolution"
+    echo "libx264 CRF 14, preset slow, source resolution"
   else
-    echo "libx264 CRF 18, preset veryfast, scale to ${HEIGHT}p"
+    echo "libx264 CRF 20, preset medium, scale to ${HEIGHT}p"
   fi
 }
 
@@ -503,8 +646,8 @@ compress_file() {
 
   if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
     # Keep video quality high and re-encode audio at high quality for compatibility.
-    audio_args=( -c:a aac -b:a 128k )
-    video_args=( -c:v libx264 -crf 12 -preset slow -fps_mode passthrough )
+    audio_args=( -c:a aac -b:a 192k )
+    video_args=( -c:v libx264 -crf 14 -preset slow -fps_mode passthrough )
   else
     if [ "${ch:-2}" -ge 6 ]; then
       audio_args=(
@@ -515,7 +658,7 @@ compress_file() {
       audio_args=( -ac 2 )
     fi
     audio_args+=( -c:a aac -b:a 128k )
-    video_args=( -c:v libx264 -crf 18 -preset veryfast -tune fastdecode -pix_fmt yuv420p -fps_mode passthrough )
+    video_args=( -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -fps_mode passthrough )
   fi
 
   if [ -n "$vf_filter" ]; then
@@ -556,7 +699,30 @@ if [ "$INPUT" != "--all" ] && [ -z "$INPUT" ]; then
   echo "  $0 --smpte --original-quality <file>  Add SMPTE and preserve source quality as much as possible"
   echo "  $0 --delete-original <file>  Delete original after successful output creation"
   echo "  $0 --yes <file>     Show overview, skip prompt, and start immediately"
+  echo "  $0 --self-update    Check GitHub, install latest script, then exit"
+  echo "  $0 --no-update ...  Skip automatic startup update check"
   exit 1
+fi
+
+if [ "$SKIP_UPDATE" -eq 0 ]; then
+  set +e
+  self_update_if_needed
+  update_exit_code=$?
+  set -e
+
+  if [ "$update_exit_code" -eq 10 ]; then
+    if [ "$SELF_UPDATE_ONLY" -eq 1 ]; then
+      echo "Update installed successfully."
+      exit 0
+    fi
+
+    echo "Restarting with updated script..."
+    exec "$SCRIPT_PATH" --skip-update "${ORIGINAL_ARGS[@]}"
+  fi
+fi
+
+if [ "$SELF_UPDATE_ONLY" -eq 1 ]; then
+  exit 0
 fi
 
 collect_input_files
@@ -572,3 +738,4 @@ confirm_preflight
 for file in "${INPUT_FILES[@]}"; do
   compress_file "$file"
 done
+
