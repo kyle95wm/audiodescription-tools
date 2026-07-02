@@ -3,13 +3,15 @@
 set -euo pipefail
 mkdir -p "cmp"
 
-SCRIPT_VERSION="1.2.1"
+SCRIPT_VERSION="1.2.2"
 # Set this to your raw GitHub script URL if you want a fixed update source.
 # Example: https://raw.githubusercontent.com/owner/repo/main/cmp_video_v2.sh
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/refs/heads/main/audio_video_tools/cmp_video_v2.sh"
 ORIGINAL_ARGS=("$@")
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/${SCRIPT_NAME}"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
+SETTINGS_FILE="${CONFIG_DIR}/cmp_video_v2.conf"
 
 HEIGHT=720
 INPUT=""
@@ -26,6 +28,104 @@ INTERACTIVE_MODE=0
 PREFLIGHT_PROCESS_COUNT=0
 PREFLIGHT_SKIP_COUNT=0
 INPUT_FILES=()
+SAVED_SETTINGS_LOADED=0
+SAVED_HEIGHT=720
+SAVED_ENABLE_SMPTE=0
+SAVED_ORIGINAL_QUALITY=0
+SAVED_NO_PROXY_APPEND=0
+SAVED_PRESERVE_CONTAINER=0
+SAVED_AUTO_CONFIRM=0
+SAVED_DELETE_ORIGINAL=0
+
+is_bool_setting() {
+  case "$1" in
+    0|1)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+apply_saved_setting() {
+  local key="$1"
+  local value="$2"
+
+  case "$key" in
+    HEIGHT)
+      if [ "$value" = "720" ] || [ "$value" = "1080" ]; then
+        HEIGHT="$value"
+        SAVED_HEIGHT="$value"
+      fi
+      ;;
+    ENABLE_SMPTE)
+      if is_bool_setting "$value"; then
+        ENABLE_SMPTE="$value"
+        SAVED_ENABLE_SMPTE="$value"
+      fi
+      ;;
+    ORIGINAL_QUALITY)
+      if is_bool_setting "$value"; then
+        ORIGINAL_QUALITY="$value"
+        SAVED_ORIGINAL_QUALITY="$value"
+      fi
+      ;;
+    NO_PROXY_APPEND)
+      if is_bool_setting "$value"; then
+        NO_PROXY_APPEND="$value"
+        SAVED_NO_PROXY_APPEND="$value"
+      fi
+      ;;
+    PRESERVE_CONTAINER)
+      if is_bool_setting "$value"; then
+        PRESERVE_CONTAINER="$value"
+        SAVED_PRESERVE_CONTAINER="$value"
+      fi
+      ;;
+    AUTO_CONFIRM)
+      if is_bool_setting "$value"; then
+        AUTO_CONFIRM="$value"
+        SAVED_AUTO_CONFIRM="$value"
+      fi
+      ;;
+    DELETE_ORIGINAL)
+      if is_bool_setting "$value"; then
+        DELETE_ORIGINAL="$value"
+        SAVED_DELETE_ORIGINAL="$value"
+      fi
+      ;;
+  esac
+}
+
+load_saved_settings() {
+  local line key value
+
+  if [ ! -f "$SETTINGS_FILE" ]; then
+    return
+  fi
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|'#'*)
+        continue
+        ;;
+    esac
+
+    key="${line%%=*}"
+    value="${line#*=}"
+
+    if [ "$key" = "$line" ]; then
+      continue
+    fi
+
+    apply_saved_setting "$key" "$value"
+  done < "$SETTINGS_FILE"
+
+  SAVED_SETTINGS_LOADED=1
+}
+
+load_saved_settings
 
 for arg in "$@"; do
   case "$arg" in
@@ -206,6 +306,7 @@ Usage:
   $0 <file>
   $0 --all
   $0 --interactive [file]
+  $0 --interactive [file]         # optionally save/update personal defaults
   $0 [--fhd] [--smpte] [--no-proxy-append] [--preserve-container] [--yes] [--delete-original] <file|--all>
   $0 --original-quality [--smpte] [--preserve-container] [--yes] [--delete-original] <file|--all>
   $0 --self-update
@@ -238,6 +339,10 @@ Options:
 Output:
   Files are written to ./cmp
   Existing output files are skipped
+
+Saved Settings:
+  Personal defaults are loaded from ${SETTINGS_FILE}
+  When your current settings differ, the script can prompt to update them
 
 Update Source Priority:
   1) CMP_VIDEO_UPDATE_URL environment variable
@@ -323,6 +428,65 @@ prompt_yes_no() {
 
     echo "Please answer y or n." >&2
   done
+}
+
+current_settings_match_saved() {
+  [ "$HEIGHT" -eq "$SAVED_HEIGHT" ] && \
+    [ "$ENABLE_SMPTE" -eq "$SAVED_ENABLE_SMPTE" ] && \
+    [ "$ORIGINAL_QUALITY" -eq "$SAVED_ORIGINAL_QUALITY" ] && \
+    [ "$NO_PROXY_APPEND" -eq "$SAVED_NO_PROXY_APPEND" ] && \
+    [ "$PRESERVE_CONTAINER" -eq "$SAVED_PRESERVE_CONTAINER" ] && \
+    [ "$AUTO_CONFIRM" -eq "$SAVED_AUTO_CONFIRM" ] && \
+    [ "$DELETE_ORIGINAL" -eq "$SAVED_DELETE_ORIGINAL" ]
+}
+
+save_current_settings() {
+  mkdir -p "$CONFIG_DIR"
+
+  cat > "$SETTINGS_FILE" <<EOF
+# Personal defaults for ${SCRIPT_NAME}
+HEIGHT=${HEIGHT}
+ENABLE_SMPTE=${ENABLE_SMPTE}
+ORIGINAL_QUALITY=${ORIGINAL_QUALITY}
+NO_PROXY_APPEND=${NO_PROXY_APPEND}
+PRESERVE_CONTAINER=${PRESERVE_CONTAINER}
+AUTO_CONFIRM=${AUTO_CONFIRM}
+DELETE_ORIGINAL=${DELETE_ORIGINAL}
+EOF
+
+  SAVED_SETTINGS_LOADED=1
+  SAVED_HEIGHT="$HEIGHT"
+  SAVED_ENABLE_SMPTE="$ENABLE_SMPTE"
+  SAVED_ORIGINAL_QUALITY="$ORIGINAL_QUALITY"
+  SAVED_NO_PROXY_APPEND="$NO_PROXY_APPEND"
+  SAVED_PRESERVE_CONTAINER="$PRESERVE_CONTAINER"
+  SAVED_AUTO_CONFIRM="$AUTO_CONFIRM"
+  SAVED_DELETE_ORIGINAL="$DELETE_ORIGINAL"
+}
+
+maybe_offer_save_settings() {
+  local prompt default_value
+
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    return
+  fi
+
+  if current_settings_match_saved; then
+    return
+  fi
+
+  if [ "$SAVED_SETTINGS_LOADED" -eq 1 ]; then
+    prompt="These settings differ from your saved defaults. Update saved settings?"
+    default_value=0
+  else
+    prompt="Save these settings as your personal defaults?"
+    default_value=1
+  fi
+
+  if [ "$(prompt_yes_no "$prompt" "$default_value")" -eq 1 ]; then
+    save_current_settings
+    echo "Saved personal settings to $SETTINGS_FILE"
+  fi
 }
 
 prompt_input_file() {
@@ -955,6 +1119,8 @@ fi
 if [ "$INTERACTIVE_MODE" -eq 1 ]; then
   run_interactive_setup
 fi
+
+maybe_offer_save_settings
 
 if [ "$INPUT" != "--all" ] && [ -z "$INPUT" ]; then
   echo "Error: missing input file or --all."
