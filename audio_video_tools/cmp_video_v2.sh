@@ -1,9 +1,13 @@
 #!/bin/bash
 
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec /bin/bash "$0" "$@"
+fi
+
 set -euo pipefail
 mkdir -p "cmp"
 
-SCRIPT_VERSION="1.2.2"
+SCRIPT_VERSION="1.2.3"
 # Set this to your raw GitHub script URL if you want a fixed update source.
 # Example: https://raw.githubusercontent.com/owner/repo/main/cmp_video_v2.sh
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/refs/heads/main/audio_video_tools/cmp_video_v2.sh"
