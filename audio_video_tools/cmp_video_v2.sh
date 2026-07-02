@@ -3,7 +3,7 @@
 set -euo pipefail
 mkdir -p "cmp"
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.1.1"
 # Set this to your raw GitHub script URL if you want a fixed update source.
 # Example: https://raw.githubusercontent.com/owner/repo/main/cmp_video_v2.sh
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/refs/heads/main/audio_video_tools/cmp_video_v2.sh"
@@ -21,6 +21,7 @@ AUTO_CONFIRM=0
 DELETE_ORIGINAL=0
 SELF_UPDATE_ONLY=0
 SKIP_UPDATE=0
+SHOW_HELP=0
 PREFLIGHT_PROCESS_COUNT=0
 PREFLIGHT_SKIP_COUNT=0
 INPUT_FILES=()
@@ -53,6 +54,9 @@ for arg in "$@"; do
       ;;
     --no-update|--skip-update)
       SKIP_UPDATE=1
+      ;;
+    -h|--help)
+      SHOW_HELP=1
       ;;
     --all)
       INPUT="--all"
@@ -188,6 +192,51 @@ self_update_if_needed() {
   rm -f "$temp_file"
   echo "Already up to date (${SCRIPT_VERSION})."
   return 0
+}
+
+print_help() {
+  cat <<EOF
+cmp_video_v2.sh - Proxy/original-quality video encoder with optional SMPTE overlay
+
+Usage:
+  $0 <file>
+  $0 --all
+  $0 [--fhd] [--smpte] [--no-proxy-append] [--preserve-container] [--yes] [--delete-original] <file|--all>
+  $0 --original-quality [--smpte] [--preserve-container] [--yes] [--delete-original] <file|--all>
+  $0 --self-update
+
+Examples:
+  $0 clip.mov
+  $0 --fhd clip.mov
+  $0 --smpte --all
+  $0 --original-quality --smpte interview.mkv
+  $0 --delete-original --yes --all
+  $0 --self-update
+
+Options:
+  --all                  Process all .mkv .mp4 .mov .m4v files in current directory
+  --fhd                  Target 1080p proxy mode (default proxy mode is 720p)
+  --original-quality     Re-encode at source resolution with high quality settings
+  --smpte                Burn subtle SMPTE timecode overlay
+  --no-proxy-append      Output name: cmp/<base>.<ext> instead of proxy suffix
+  --npa                  Alias for --no-proxy-append
+  --preserve-container   Keep source container extension instead of forcing .mp4
+  --delete-original      Delete source only after successful, non-empty output
+  --yes, --force         Skip confirmation prompt after preflight overview
+  --self-update, --update Check GitHub and install latest script version, then exit
+  --no-update, --skip-update
+                         Skip automatic startup update check
+  -h, --help             Show this help menu
+
+Output:
+  Files are written to ./cmp
+  Existing output files are skipped
+
+Update Source Priority:
+  1) CMP_VIDEO_UPDATE_URL environment variable
+  2) DEFAULT_UPDATE_URL in this script
+  3) Git remote-derived raw GitHub URL
+EOF
 }
 
 get_video_fps() {
@@ -685,22 +734,15 @@ compress_file() {
   fi
 }
 
-if [ "$INPUT" != "--all" ] && [ -z "$INPUT" ]; then
-  echo "Usage:"
-  echo "  $0 <file>           Create 720p proxy for one video"
-  echo "  $0 --all            Create 720p proxies for all videos"
-  echo "  $0 --fhd <file>     Create 1080p proxy for one video"
-  echo "  $0 <file> --fhd     Create 1080p proxy for one video"
-  echo "  $0 --fhd --all      Create 1080p proxies for all videos"
-  echo "  $0 --no-proxy-append|--npa <file>  Name proxy output cmp/<base>.mp4"
-  echo "  $0 --preserve-container <file>  Keep the source container extension"
-  echo "  $0 --smpte <file>   Add subtle SMPTE overlay to proxy"
-  echo "  $0 --smpte --all    Add subtle SMPTE overlay to all proxies"
-  echo "  $0 --smpte --original-quality <file>  Add SMPTE and preserve source quality as much as possible"
-  echo "  $0 --delete-original <file>  Delete original after successful output creation"
-  echo "  $0 --yes <file>     Show overview, skip prompt, and start immediately"
-  echo "  $0 --self-update    Check GitHub, install latest script, then exit"
-  echo "  $0 --no-update ...  Skip automatic startup update check"
+if [ "$SHOW_HELP" -eq 1 ] || [ "${#ORIGINAL_ARGS[@]}" -eq 0 ]; then
+  print_help
+  exit 0
+fi
+
+if [ "$SELF_UPDATE_ONLY" -ne 1 ] && [ "$INPUT" != "--all" ] && [ -z "$INPUT" ]; then
+  echo "Error: missing input file or --all."
+  echo
+  print_help
   exit 1
 fi
 
