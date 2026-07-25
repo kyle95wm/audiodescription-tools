@@ -6,7 +6,7 @@ fi
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.7.0"
 # Set this to your raw GitHub script URL if you want a fixed update source.
 # Example: https://raw.githubusercontent.com/owner/repo/main/cmp_video_v2.sh
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/refs/heads/main/audio_video_tools/cmp_video_v2.sh"
@@ -32,6 +32,10 @@ RECURSIVE=0
 PREFLIGHT_PROCESS_COUNT=0
 PREFLIGHT_SKIP_COUNT=0
 INPUT_FILES=()
+RESUME_FILE="${PWD}/.cmp_video_v2_resume"
+RESUME_LOADED=0
+RESUME_PATHS=()
+RESUME_IDENTITIES=()
 SAVED_SETTINGS_LOADED=0
 SAVED_HEIGHT=720
 SAVED_ENABLE_SMPTE=0
@@ -355,6 +359,13 @@ Output:
   With --delete-original(s), each output is written beside its source
   Recursive searches ignore all directories named cmp
   Existing output files are skipped
+
+Interrupted Delete-Original Jobs:
+  Recursive delete-original jobs keep a hidden .cmp_video_v2_resume queue
+  Re-run with the same command and settings to resume only unfinished originals
+  Encodes use hidden temporary files and publish outputs only after FFmpeg succeeds
+  Same-name --no-proxy-append replacements are tracked by original file identity
+  The resume queue is removed automatically when the job completes
 
 Saved Settings:
   Personal defaults are loaded from ${SETTINGS_FILE}
@@ -938,6 +949,126 @@ get_output_file() {
   fi
 }
 
+resume_settings_signature() {
+  printf 'HEIGHT=%s;SMPTE=%s;OQ=%s;NPA=%s;CONTAINER=%s;DELETE=%s\n' \
+    "$HEIGHT" "$ENABLE_SMPTE" "$ORIGINAL_QUALITY" "$NO_PROXY_APPEND" \
+    "$PRESERVE_CONTAINER" "$DELETE_ORIGINAL"
+}
+
+get_file_identity() {
+  local input_file="$1"
+  local identity
+
+  identity="$(stat -f '%d:%i:%z:%m' "$input_file" 2>/dev/null || true)"
+  if [ -n "$identity" ]; then
+    echo "$identity"
+    return
+  fi
+
+  stat -c '%d:%i:%s:%Y' "$input_file" 2>/dev/null || true
+}
+
+write_resume_manifest() {
+  local temp_file="$1"
+  local i
+
+  printf '%s\0' "CMP_VIDEO_V2_RESUME_V2" > "$temp_file"
+  printf '%s\0' "$(resume_settings_signature)" >> "$temp_file"
+  for ((i = 0; i < ${#RESUME_PATHS[@]}; i++)); do
+    printf '%s\0' "${RESUME_IDENTITIES[$i]}" >> "$temp_file"
+    printf '%s\0' "${RESUME_PATHS[$i]}" >> "$temp_file"
+  done
+}
+
+save_resume_queue() {
+  local temp_file
+
+  temp_file="$(mktemp "${RESUME_FILE}.tmp.XXXXXX")"
+  write_resume_manifest "$temp_file"
+  mv -f -- "$temp_file" "$RESUME_FILE"
+}
+
+load_resume_queue() {
+  local record_number=0
+  local record expected_signature
+  local pending_identity=""
+  local current_identity
+
+  expected_signature="$(resume_settings_signature)"
+  RESUME_PATHS=()
+  RESUME_IDENTITIES=()
+
+  while IFS= read -r -d '' record; do
+    record_number=$((record_number + 1))
+    if [ "$record_number" -eq 1 ]; then
+      if [ "$record" != "CMP_VIDEO_V2_RESUME_V2" ]; then
+        echo "Error: unreadable resume file: $RESUME_FILE" >&2
+        exit 1
+      fi
+    elif [ "$record_number" -eq 2 ]; then
+      if [ "$record" != "$expected_signature" ]; then
+        echo "Error: this interrupted job used different encoding settings." >&2
+        echo "Re-run with the original settings to resume it." >&2
+        echo "Resume file: $RESUME_FILE" >&2
+        exit 1
+      fi
+    elif [ $((record_number % 2)) -eq 1 ]; then
+      pending_identity="$record"
+    elif [ -f "$record" ]; then
+      current_identity="$(get_file_identity "$record")"
+      if [ "$NO_PROXY_APPEND" -eq 1 ] && \
+         [ -n "$pending_identity" ] && \
+         [ "$current_identity" != "$pending_identity" ]; then
+        echo "Recovered completed same-name output: $record"
+      else
+        RESUME_IDENTITIES+=( "$pending_identity" )
+        RESUME_PATHS+=( "$record" )
+      fi
+    fi
+  done < "$RESUME_FILE"
+
+  if [ "$record_number" -lt 2 ] || [ $((record_number % 2)) -ne 0 ]; then
+    echo "Error: incomplete resume file: $RESUME_FILE" >&2
+    exit 1
+  fi
+
+  INPUT_FILES=( ${RESUME_PATHS[@]+"${RESUME_PATHS[@]}"} )
+  RESUME_LOADED=1
+
+  if [ "${#INPUT_FILES[@]}" -eq 0 ]; then
+    rm -f -- "$RESUME_FILE"
+  else
+    save_resume_queue
+  fi
+}
+
+remove_from_resume_queue() {
+  local completed_file="$1"
+  local i
+  local remaining_paths=()
+  local remaining_identities=()
+
+  if [ ! -f "$RESUME_FILE" ]; then
+    return
+  fi
+
+  for ((i = 0; i < ${#RESUME_PATHS[@]}; i++)); do
+    if [ "${RESUME_PATHS[$i]}" != "$completed_file" ]; then
+      remaining_paths+=( "${RESUME_PATHS[$i]}" )
+      remaining_identities+=( "${RESUME_IDENTITIES[$i]}" )
+    fi
+  done
+
+  RESUME_PATHS=( ${remaining_paths[@]+"${remaining_paths[@]}"} )
+  RESUME_IDENTITIES=( ${remaining_identities[@]+"${remaining_identities[@]}"} )
+
+  if [ "${#RESUME_PATHS[@]}" -eq 0 ]; then
+    rm -f -- "$RESUME_FILE"
+  else
+    save_resume_queue
+  fi
+}
+
 paths_are_same_file() {
   local first_path="$1"
   local second_path="$2"
@@ -1036,6 +1167,12 @@ collect_input_files() {
 
   INPUT_FILES=()
 
+  if [ "$RECURSIVE" -eq 1 ] && [ "$DELETE_ORIGINAL" -eq 1 ] && [ -f "$RESUME_FILE" ]; then
+    echo "Resuming interrupted delete-original job from $RESUME_FILE"
+    load_resume_queue
+    return
+  fi
+
   if [ "$INPUT" = "--all" ] && [ "$RECURSIVE" -eq 1 ]; then
     while IFS= read -r -d '' input_file; do
       INPUT_FILES+=( "$input_file" )
@@ -1043,6 +1180,7 @@ collect_input_files() {
       find . \
         -type d -name cmp -prune -o \
         -type f \( -iname '*.mkv' -o -iname '*.mp4' -o -iname '*.mov' -o -iname '*.m4v' \) \
+        ! -name '.*.cmp_video_tmp.*' \
         -print0
     )
   elif [ "$INPUT" = "--all" ]; then
@@ -1104,9 +1242,14 @@ print_preflight_summary() {
     status="CREATE"
 
     if [ -f "$output_file" ] && ! paths_are_same_file "$input_file" "$output_file"; then
-      status="SKIP"
-      PREFLIGHT_SKIP_COUNT=$((PREFLIGHT_SKIP_COUNT + 1))
       output_bytes="$(get_file_size_bytes "$output_file")"
+      if [ "$RESUME_LOADED" -eq 1 ] && [ -s "$output_file" ]; then
+        status="FINALIZE"
+        PREFLIGHT_PROCESS_COUNT=$((PREFLIGHT_PROCESS_COUNT + 1))
+      else
+        status="SKIP"
+        PREFLIGHT_SKIP_COUNT=$((PREFLIGHT_SKIP_COUNT + 1))
+      fi
     else
       PREFLIGHT_PROCESS_COUNT=$((PREFLIGHT_PROCESS_COUNT + 1))
       output_bytes=""
@@ -1129,7 +1272,9 @@ print_preflight_summary() {
     echo "  source: $(format_bytes "$source_bytes") | duration: $(format_duration "$duration")"
     echo "  output: $output_file"
 
-    if [ "$status" = "SKIP" ] && [ -n "$output_bytes" ]; then
+    if [ "$status" = "FINALIZE" ] && [ -n "$output_bytes" ]; then
+      echo "  output size: $(format_bytes "$output_bytes") (encode complete; original deletion pending)"
+    elif [ "$status" = "SKIP" ] && [ -n "$output_bytes" ]; then
       echo "  output size: $(format_bytes "$output_bytes") (existing)"
     elif [ -n "$estimate_bytes" ]; then
       echo "  estimated output: $(format_bytes "$estimate_bytes")"
@@ -1218,11 +1363,22 @@ compress_file() {
     return 1
   fi
 
-  local output_file encode_output
+  local output_file encode_output replace_in_place=0
   output_file="$(get_output_file "$input_file")"
   encode_output="$output_file"
 
+  if [ "$RESUME_LOADED" -eq 1 ] && [ -s "$output_file" ] && ! paths_are_same_file "$input_file" "$output_file"; then
+    printf "[%d/%d] %s\n" "$file_index" "$file_total" "$(basename "$input_file")"
+    rm -- "$input_file"
+    echo "  Encode was already complete; deleted original and finalized: $output_file"
+    return 0
+  fi
+
   if paths_are_same_file "$input_file" "$output_file"; then
+    replace_in_place=1
+  fi
+
+  if [ "$DELETE_ORIGINAL" -eq 1 ] || [ "$replace_in_place" -eq 1 ]; then
     local output_filename output_base output_ext
     output_filename="$(basename "$output_file")"
     output_base="${output_filename%.*}"
@@ -1293,7 +1449,7 @@ compress_file() {
       -sn \
       -i "$input_file" \
       -map 0:v:0 -map "0:${a_stream}" \
-      "${filter_args[@]}" \
+      ${filter_args[@]+"${filter_args[@]}"} \
       "${video_args[@]}" \
       "${audio_args[@]}" \
       "$encode_output" 2>"$error_log" |
@@ -1323,6 +1479,9 @@ compress_file() {
 
     if [ "$encode_output" != "$output_file" ]; then
       mv -f -- "$encode_output" "$output_file"
+    fi
+
+    if [ "$replace_in_place" -eq 1 ]; then
       echo "Replaced original with encoded output: $output_file"
     else
       rm -- "$input_file"
@@ -1391,7 +1550,9 @@ JOB_TOTAL_DURATION=0
 for file in "${INPUT_FILES[@]}"; do
   output_file="$(get_output_file "$file")"
   if [ -f "$output_file" ] && ! paths_are_same_file "$file" "$output_file"; then
-    continue
+    if [ "$RESUME_LOADED" -eq 0 ] || [ ! -s "$output_file" ]; then
+      continue
+    fi
   fi
 
   duration="$(get_duration_seconds "$file")"
@@ -1410,11 +1571,23 @@ JOB_STARTED="$(date +%s)"
 COMPLETED_DURATION=0
 PROCESS_TOTAL="${#PROCESS_FILES[@]}"
 
+if [ "$RECURSIVE" -eq 1 ] && [ "$DELETE_ORIGINAL" -eq 1 ] && [ "$RESUME_LOADED" -eq 0 ]; then
+  RESUME_PATHS=( "${PROCESS_FILES[@]}" )
+  RESUME_IDENTITIES=()
+  for file in "${RESUME_PATHS[@]}"; do
+    RESUME_IDENTITIES+=( "$(get_file_identity "$file")" )
+  done
+  save_resume_queue
+fi
+
 for ((i = 0; i < PROCESS_TOTAL; i++)); do
   compress_file \
     "${PROCESS_FILES[$i]}" "$((i + 1))" "$PROCESS_TOTAL" \
     "${PROCESS_DURATIONS[$i]}" "$COMPLETED_DURATION" \
     "$JOB_TOTAL_DURATION" "$JOB_STARTED"
+  if [ "$RECURSIVE" -eq 1 ] && [ "$DELETE_ORIGINAL" -eq 1 ]; then
+    remove_from_resume_queue "${PROCESS_FILES[$i]}"
+  fi
   COMPLETED_DURATION="$(awk \
     -v completed="$COMPLETED_DURATION" \
     -v duration="${PROCESS_DURATIONS[$i]}" '
