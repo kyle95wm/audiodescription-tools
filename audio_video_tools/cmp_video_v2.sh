@@ -6,7 +6,7 @@ fi
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.5.0"
 # Set this to your raw GitHub script URL if you want a fixed update source.
 # Example: https://raw.githubusercontent.com/owner/repo/main/cmp_video_v2.sh
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/refs/heads/main/audio_video_tools/cmp_video_v2.sh"
@@ -699,6 +699,160 @@ format_duration() {
   '
 }
 
+format_eta() {
+  local seconds="${1:-}"
+
+  if [ -z "$seconds" ] || ! awk -v value="$seconds" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value >= 0) }'; then
+    echo "--:--:--"
+    return
+  fi
+
+  awk -v value="$seconds" '
+    BEGIN {
+      total = int(value + 0.5)
+      hours = int(total / 3600)
+      minutes = int((total % 3600) / 60)
+      secs = total % 60
+      printf "%02d:%02d:%02d", hours, minutes, secs
+    }
+  '
+}
+
+progress_time_to_seconds() {
+  local timestamp="${1:-}"
+
+  awk -F: -v value="$timestamp" '
+    BEGIN {
+      part_count = split(value, parts, ":")
+      if (part_count != 3) {
+        print "0"
+        exit
+      }
+      printf "%.6f", (parts[1] * 3600) + (parts[2] * 60) + parts[3]
+    }
+  '
+}
+
+render_encode_progress() {
+  local file_index="$1"
+  local file_total="$2"
+  local file_duration="$3"
+  local completed_duration="$4"
+  local job_duration="$5"
+  local file_started="$6"
+  local job_started="$7"
+  local display_name="$8"
+  local line key value progress_state
+  local out_seconds=0
+  local file_percent=0
+  local job_percent=0
+  local file_eta=""
+  local job_eta=""
+  local now file_elapsed job_elapsed
+  local last_bucket=-1
+  local current_bucket
+  local terminal_output=0
+
+  if [ -t 1 ]; then
+    terminal_output=1
+  fi
+
+  printf "[%d/%d] %s\n" "$file_index" "$file_total" "$display_name"
+
+  while IFS= read -r line; do
+    key="${line%%=*}"
+    value="${line#*=}"
+
+    case "$key" in
+      out_time)
+        out_seconds="$(progress_time_to_seconds "$value")"
+        ;;
+      progress)
+        progress_state="$value"
+        now="$(date +%s)"
+        file_elapsed=$((now - file_started))
+        job_elapsed=$((now - job_started))
+
+        if [ "$progress_state" = "end" ]; then
+          file_percent=100
+          out_seconds="$file_duration"
+        elif awk -v duration="$file_duration" 'BEGIN { exit !((duration + 0) > 0) }'; then
+          file_percent="$(awk -v current="$out_seconds" -v duration="$file_duration" '
+            BEGIN {
+              percent = current * 100 / duration
+              if (percent < 0) percent = 0
+              if (percent > 99.9) percent = 99.9
+              printf "%.1f", percent
+            }
+          ')"
+        else
+          file_percent=0
+        fi
+
+        if awk -v percent="$file_percent" 'BEGIN { exit !((percent + 0) > 0) }'; then
+          file_eta="$(awk -v elapsed="$file_elapsed" -v percent="$file_percent" '
+            BEGIN { printf "%.0f", elapsed * (100 - percent) / percent }
+          ')"
+        else
+          file_eta=""
+        fi
+
+        if awk -v duration="$job_duration" 'BEGIN { exit !((duration + 0) > 0) }'; then
+          job_percent="$(awk \
+            -v completed="$completed_duration" \
+            -v current="$out_seconds" \
+            -v duration="$job_duration" '
+            BEGIN {
+              percent = (completed + current) * 100 / duration
+              if (percent < 0) percent = 0
+              if (percent > 100) percent = 100
+              printf "%.1f", percent
+            }
+          ')"
+        else
+          job_percent="$(awk \
+            -v index="$file_index" \
+            -v total="$file_total" \
+            -v percent="$file_percent" '
+            BEGIN { printf "%.1f", (((index - 1) + (percent / 100)) * 100) / total }
+          ')"
+        fi
+
+        if awk -v percent="$job_percent" 'BEGIN { exit !((percent + 0) > 0) }'; then
+          job_eta="$(awk -v elapsed="$job_elapsed" -v percent="$job_percent" '
+            BEGIN { printf "%.0f", elapsed * (100 - percent) / percent }
+          ')"
+        else
+          job_eta=""
+        fi
+
+        current_bucket="$(awk -v percent="$file_percent" 'BEGIN { print int(percent / 10) }')"
+        if [ "$terminal_output" -eq 1 ]; then
+          printf "\r\033[K  File %5.1f%%  ETA %s  |  Job %5.1f%%  ETA %s" \
+            "$file_percent" "$(format_eta "$file_eta")" \
+            "$job_percent" "$(format_eta "$job_eta")"
+        elif [ "$current_bucket" -gt "$last_bucket" ] || [ "$progress_state" = "end" ]; then
+          printf "  File %5.1f%%  ETA %s  |  Job %5.1f%%  ETA %s\n" \
+            "$file_percent" "$(format_eta "$file_eta")" \
+            "$job_percent" "$(format_eta "$job_eta")"
+          last_bucket="$current_bucket"
+        fi
+
+        if [ "$progress_state" = "end" ]; then
+          if [ "$terminal_output" -eq 1 ]; then
+            printf "\n"
+          fi
+          return
+        fi
+        ;;
+    esac
+  done
+
+  if [ "$terminal_output" -eq 1 ]; then
+    printf "\n"
+  fi
+}
+
 yes_no() {
   if [ "${1:-0}" -eq 1 ]; then
     echo "yes"
@@ -1052,6 +1206,12 @@ confirm_preflight() {
 
 compress_file() {
   local input_file="$1"
+  local file_index="$2"
+  local file_total="$3"
+  local file_duration="$4"
+  local completed_duration="$5"
+  local job_duration="$6"
+  local job_started="$7"
 
   if [ ! -f "$input_file" ]; then
     echo "File not found: $input_file"
@@ -1061,11 +1221,6 @@ compress_file() {
   local output_file encode_output
   output_file="$(get_output_file "$input_file")"
   encode_output="$output_file"
-
-  if [ -f "$output_file" ] && ! paths_are_same_file "$input_file" "$output_file"; then
-    echo "Skipping $input_file (proxy exists)"
-    return 0
-  fi
 
   if paths_are_same_file "$input_file" "$output_file"; then
     local output_filename output_base output_ext
@@ -1128,17 +1283,37 @@ compress_file() {
     filter_args=( -vf "$vf_filter" )
   fi
 
-  if ! ffmpeg -hide_banner -loglevel warning -stats \
+  local error_log file_started
+  local pipeline_status=()
+  error_log="$(mktemp "${TMPDIR:-/tmp}/cmp_video_v2_ffmpeg.XXXXXX")"
+  file_started="$(date +%s)"
+
+  set +e
+  ffmpeg -hide_banner -loglevel error -nostats -progress pipe:1 \
       -sn \
       -i "$input_file" \
       -map 0:v:0 -map "0:${a_stream}" \
       "${filter_args[@]}" \
       "${video_args[@]}" \
       "${audio_args[@]}" \
-      "$encode_output"; then
+      "$encode_output" 2>"$error_log" |
+    render_encode_progress \
+      "$file_index" "$file_total" "$file_duration" \
+      "$completed_duration" "$job_duration" \
+      "$file_started" "$job_started" "$(basename "$input_file")"
+  pipeline_status=("${PIPESTATUS[@]}")
+  set -e
+
+  if [ "${pipeline_status[0]}" -ne 0 ]; then
+    echo "FFmpeg failed while encoding: $input_file" >&2
+    if [ -s "$error_log" ]; then
+      sed 's/^/  /' "$error_log" >&2
+    fi
+    rm -f -- "$error_log"
     rm -f -- "$encode_output"
     return 1
   fi
+  rm -f -- "$error_log"
 
   if [ "$DELETE_ORIGINAL" -eq 1 ]; then
     if [ ! -s "$encode_output" ]; then
@@ -1209,6 +1384,42 @@ fi
 validate_input_files
 confirm_preflight
 
+PROCESS_FILES=()
+PROCESS_DURATIONS=()
+JOB_TOTAL_DURATION=0
+
 for file in "${INPUT_FILES[@]}"; do
-  compress_file "$file"
+  output_file="$(get_output_file "$file")"
+  if [ -f "$output_file" ] && ! paths_are_same_file "$file" "$output_file"; then
+    continue
+  fi
+
+  duration="$(get_duration_seconds "$file")"
+  if ! awk -v value="$duration" 'BEGIN { exit !((value + 0) > 0) }'; then
+    duration=0
+  fi
+
+  PROCESS_FILES+=( "$file" )
+  PROCESS_DURATIONS+=( "$duration" )
+  JOB_TOTAL_DURATION="$(awk -v total="$JOB_TOTAL_DURATION" -v duration="$duration" '
+    BEGIN { printf "%.6f", total + duration }
+  ')"
 done
+
+JOB_STARTED="$(date +%s)"
+COMPLETED_DURATION=0
+PROCESS_TOTAL="${#PROCESS_FILES[@]}"
+
+for ((i = 0; i < PROCESS_TOTAL; i++)); do
+  compress_file \
+    "${PROCESS_FILES[$i]}" "$((i + 1))" "$PROCESS_TOTAL" \
+    "${PROCESS_DURATIONS[$i]}" "$COMPLETED_DURATION" \
+    "$JOB_TOTAL_DURATION" "$JOB_STARTED"
+  COMPLETED_DURATION="$(awk \
+    -v completed="$COMPLETED_DURATION" \
+    -v duration="${PROCESS_DURATIONS[$i]}" '
+    BEGIN { printf "%.6f", completed + duration }
+  ')"
+done
+
+echo "Completed ${PROCESS_TOTAL} file(s) in $(format_duration "$(( $(date +%s) - JOB_STARTED ))")."
