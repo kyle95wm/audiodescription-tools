@@ -6,7 +6,7 @@ fi
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.8.0"
+SCRIPT_VERSION="1.9.0"
 # Set this to your raw GitHub script URL if you want a fixed update source.
 # Example: https://raw.githubusercontent.com/owner/repo/main/cmp_video_v2.sh
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/refs/heads/main/audio_video_tools/cmp_video_v2.sh"
@@ -37,6 +37,7 @@ INPUT_FILES=()
 INPUT_FILE_COUNT=0
 RESUME_FILE="${PWD}/.cmp_video_v2_resume"
 RESUME_LOADED=0
+RESUME_REQUESTED=0
 RESUME_PATHS=()
 RESUME_IDENTITIES=()
 VERIFY_MODE="quick"
@@ -179,6 +180,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --reencode-processed|--reencode)
       REENCODE_PROCESSED=1
+      ;;
+    --resume)
+      RESUME_REQUESTED=1
       ;;
     --stop-after-current)
       STOP_AFTER_CURRENT=1
@@ -357,6 +361,7 @@ Usage:
   $0 --interactive [file]         # optionally save/update personal defaults
   $0 [--fhd] [--smpte] [--no-proxy-append] [--preserve-container] [--yes] [--delete-original] <file|--all|--recursive>
   $0 --original-quality [--smpte] [--preserve-container] [--yes] [--delete-original] <file|--all|--recursive>
+  $0 --resume
   $0 --self-update
 
 Examples:
@@ -367,6 +372,7 @@ Examples:
   $0 --recursive
   $0 --original-quality --smpte interview.mkv
   $0 --delete-original --yes --all
+  $0 --resume
   $0 --self-update
 
 Options:
@@ -386,6 +392,8 @@ Options:
   --deep-verify          Fully decode each output before deleting its original
   --no-verify            Disable output verification (not recommended with deletion)
   --reencode-processed   Include outputs recorded as previously processed
+  --resume               From the original job directory, resume the interrupted
+                         job and restore its encoding settings automatically
   --stop-after-current   Finish one file, preserve state, and exit cleanly
   --yes, --force         Skip confirmation prompt after preflight overview
   --self-update, --update Check GitHub and install latest script version, then exit
@@ -403,6 +411,7 @@ Output:
 Interrupted Delete-Original Jobs:
   Batch delete-original jobs keep a hidden .cmp_video_v2_resume queue
   Re-run with the same command and settings to resume only unfinished originals
+  Or run with --resume to restore those settings automatically
   Encodes use hidden temporary files and publish outputs only after FFmpeg succeeds
   Same-name --no-proxy-append replacements are tracked by original file identity
   The resume queue is removed automatically when the job completes
@@ -996,9 +1005,87 @@ get_output_file() {
 }
 
 resume_settings_signature() {
-  printf 'HEIGHT=%s;SMPTE=%s;OQ=%s;NPA=%s;CONTAINER=%s;DELETE=%s;VERIFY=%s\n' \
+  printf 'HEIGHT=%s;SMPTE=%s;OQ=%s;NPA=%s;CONTAINER=%s;DELETE=%s;VERIFY=%s;RECURSIVE=%s\n' \
     "$HEIGHT" "$ENABLE_SMPTE" "$ORIGINAL_QUALITY" "$NO_PROXY_APPEND" \
-    "$PRESERVE_CONTAINER" "$DELETE_ORIGINAL" "$VERIFY_MODE"
+    "$PRESERVE_CONTAINER" "$DELETE_ORIGINAL" "$VERIFY_MODE" "$RECURSIVE"
+}
+
+apply_resume_settings_signature() {
+  local signature="$1"
+  local field key value
+  local fields=()
+
+  IFS=';' read -r -a fields <<< "$signature"
+  for field in "${fields[@]}"; do
+    key="${field%%=*}"
+    value="${field#*=}"
+    case "$key" in
+      HEIGHT)
+        if [ "$value" = "720" ] || [ "$value" = "1080" ]; then HEIGHT="$value"; fi
+        ;;
+      SMPTE)
+        if is_bool_setting "$value"; then ENABLE_SMPTE="$value"; fi
+        ;;
+      OQ)
+        if is_bool_setting "$value"; then ORIGINAL_QUALITY="$value"; fi
+        ;;
+      NPA)
+        if is_bool_setting "$value"; then NO_PROXY_APPEND="$value"; fi
+        ;;
+      CONTAINER)
+        if is_bool_setting "$value"; then PRESERVE_CONTAINER="$value"; fi
+        ;;
+      DELETE)
+        if is_bool_setting "$value"; then DELETE_ORIGINAL="$value"; fi
+        ;;
+      VERIFY)
+        case "$value" in quick|deep|none) VERIFY_MODE="$value" ;; esac
+        ;;
+      RECURSIVE)
+        if is_bool_setting "$value"; then RECURSIVE="$value"; fi
+        ;;
+    esac
+  done
+}
+
+prepare_resume_request() {
+  local header settings
+
+  if [ "$RESUME_REQUESTED" -eq 0 ]; then
+    return
+  fi
+
+  if [ ! -f "$RESUME_FILE" ]; then
+    echo "Error: no interrupted job is available in this directory." >&2
+    echo "Expected resume file: $RESUME_FILE" >&2
+    exit 1
+  fi
+
+  exec 3< "$RESUME_FILE"
+  IFS= read -r -d '' header <&3 || true
+  IFS= read -r -d '' settings <&3 || true
+  exec 3<&-
+
+  case "$header" in
+    CMP_VIDEO_V2_RESUME_V2|CMP_VIDEO_V2_RESUME_V3)
+      ;;
+    *)
+      echo "Error: unreadable resume file: $RESUME_FILE" >&2
+      exit 1
+      ;;
+  esac
+
+  if [ -z "$settings" ]; then
+    echo "Error: resume file contains no saved settings: $RESUME_FILE" >&2
+    exit 1
+  fi
+
+  RECURSIVE=1
+  apply_resume_settings_signature "$settings"
+  INPUT="--all"
+  AUTO_CONFIRM=1
+  STOP_AFTER_CURRENT=0
+  echo "Restored settings from interrupted job."
 }
 
 get_file_identity() {
@@ -1078,7 +1165,7 @@ print_interrupt_summary() {
     echo "Current original kept; existing completed outputs will be skipped."
   fi
   echo "Elapsed: $(format_duration "$elapsed")"
-  echo "Re-run the same command and settings to resume."
+  echo "Run ${SCRIPT_NAME} --resume to continue."
   exit "$exit_code"
 }
 
@@ -1092,7 +1179,7 @@ write_resume_manifest() {
   local temp_file="$1"
   local i
 
-  printf '%s\0' "CMP_VIDEO_V2_RESUME_V2" > "$temp_file"
+  printf '%s\0' "CMP_VIDEO_V2_RESUME_V3" > "$temp_file"
   printf '%s\0' "$(resume_settings_signature)" >> "$temp_file"
   for ((i = 0; i < ${#RESUME_PATHS[@]}; i++)); do
     printf '%s\0' "${RESUME_IDENTITIES[$i]}" >> "$temp_file"
@@ -1121,14 +1208,17 @@ load_resume_queue() {
   while IFS= read -r -d '' record; do
     record_number=$((record_number + 1))
     if [ "$record_number" -eq 1 ]; then
-      if [ "$record" != "CMP_VIDEO_V2_RESUME_V2" ]; then
-        echo "Error: unreadable resume file: $RESUME_FILE" >&2
-        exit 1
-      fi
+      case "$record" in
+        CMP_VIDEO_V2_RESUME_V2|CMP_VIDEO_V2_RESUME_V3) ;;
+        *)
+          echo "Error: unreadable resume file: $RESUME_FILE" >&2
+          exit 1
+          ;;
+      esac
     elif [ "$record_number" -eq 2 ]; then
-      if [ "$record" != "$expected_signature" ]; then
+      if [ "$RESUME_REQUESTED" -eq 0 ] && [ "$record" != "$expected_signature" ]; then
         echo "Error: this interrupted job used different encoding settings." >&2
-        echo "Re-run with the original settings to resume it." >&2
+        echo "Re-run with --resume to restore them automatically." >&2
         echo "Resume file: $RESUME_FILE" >&2
         exit 1
       fi
@@ -1743,11 +1833,15 @@ if [ "$SELF_UPDATE_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+prepare_resume_request
+
 if [ "$INTERACTIVE_MODE" -eq 1 ]; then
   run_interactive_setup
 fi
 
-maybe_offer_save_settings
+if [ "$RESUME_REQUESTED" -eq 0 ]; then
+  maybe_offer_save_settings
+fi
 
 if [ "$DELETE_ORIGINAL" -eq 0 ]; then
   mkdir -p "cmp"
