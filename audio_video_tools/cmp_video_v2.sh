@@ -6,7 +6,7 @@ fi
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.7.0"
+SCRIPT_VERSION="1.8.0"
 # Set this to your raw GitHub script URL if you want a fixed update source.
 # Example: https://raw.githubusercontent.com/owner/repo/main/cmp_video_v2.sh
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/refs/heads/main/audio_video_tools/cmp_video_v2.sh"
@@ -15,6 +15,7 @@ SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/${SCRIPT_NAME}"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
 SETTINGS_FILE="${CONFIG_DIR}/cmp_video_v2.conf"
+PROCESSED_FILE="${PWD}/.cmp_video_v2_processed"
 
 HEIGHT=720
 INPUT=""
@@ -31,11 +32,21 @@ INTERACTIVE_MODE=0
 RECURSIVE=0
 PREFLIGHT_PROCESS_COUNT=0
 PREFLIGHT_SKIP_COUNT=0
+PROCESSED_SKIP_COUNT=0
 INPUT_FILES=()
+INPUT_FILE_COUNT=0
 RESUME_FILE="${PWD}/.cmp_video_v2_resume"
 RESUME_LOADED=0
 RESUME_PATHS=()
 RESUME_IDENTITIES=()
+VERIFY_MODE="quick"
+REENCODE_PROCESSED=0
+STOP_AFTER_CURRENT=0
+STOPPED_EARLY=0
+CURRENT_TEMP_FILE=""
+COMPLETED_COUNT=0
+FAILED_COUNT=0
+JOB_STARTED=0
 SAVED_SETTINGS_LOADED=0
 SAVED_HEIGHT=720
 SAVED_ENABLE_SMPTE=0
@@ -135,7 +146,9 @@ load_saved_settings() {
 
 load_saved_settings
 
-for arg in "$@"; do
+while [ "$#" -gt 0 ]; do
+  arg="$1"
+  shift
   case "$arg" in
     --fhd)
       HEIGHT=1080
@@ -158,6 +171,18 @@ for arg in "$@"; do
     --delete-original|--delete-originals)
       DELETE_ORIGINAL=1
       ;;
+    --deep-verify)
+      VERIFY_MODE="deep"
+      ;;
+    --no-verify)
+      VERIFY_MODE="none"
+      ;;
+    --reencode-processed|--reencode)
+      REENCODE_PROCESSED=1
+      ;;
+    --stop-after-current)
+      STOP_AFTER_CURRENT=1
+      ;;
     --interactive)
       INTERACTIVE_MODE=1
       ;;
@@ -176,6 +201,16 @@ for arg in "$@"; do
     --recursive|-r)
       INPUT="--all"
       RECURSIVE=1
+      ;;
+    --)
+      if [ "$#" -gt 0 ]; then
+        INPUT="$1"
+        shift
+      fi
+      ;;
+    -*)
+      echo "Error: unknown option: $arg" >&2
+      exit 1
       ;;
     *)
       INPUT="$arg"
@@ -337,7 +372,7 @@ Examples:
 Options:
   --all                  Process all .mkv .mp4 .mov .m4v files in current directory
   --recursive, -r        Process supported files below the current directory
-                         and write all outputs to the root ./cmp directory
+                         and preserve matching subdirectories below ./cmp
   --interactive          Prompt for input and compatible settings in a guided menu
   --fhd                  Target 1080p proxy mode (default proxy mode is 720p)
   --original-quality     Re-encode at source resolution with high quality settings
@@ -348,6 +383,10 @@ Options:
   --delete-original, --delete-originals
                          Delete source only after successful, non-empty output;
                          output is written beside the source instead of in ./cmp
+  --deep-verify          Fully decode each output before deleting its original
+  --no-verify            Disable output verification (not recommended with deletion)
+  --reencode-processed   Include outputs recorded as previously processed
+  --stop-after-current   Finish one file, preserve state, and exit cleanly
   --yes, --force         Skip confirmation prompt after preflight overview
   --self-update, --update Check GitHub and install latest script version, then exit
   --no-update, --skip-update
@@ -356,12 +395,13 @@ Options:
 
 Output:
   Files are normally written to ./cmp
+  Recursive output preserves source subdirectories below ./cmp
   With --delete-original(s), each output is written beside its source
   Recursive searches ignore all directories named cmp
-  Existing output files are skipped
+  Existing and previously processed output files are skipped
 
 Interrupted Delete-Original Jobs:
-  Recursive delete-original jobs keep a hidden .cmp_video_v2_resume queue
+  Batch delete-original jobs keep a hidden .cmp_video_v2_resume queue
   Re-run with the same command and settings to resume only unfinished originals
   Encodes use hidden temporary files and publish outputs only after FFmpeg succeeds
   Same-name --no-proxy-append replacements are tracked by original file identity
@@ -914,12 +954,18 @@ describe_output_naming() {
 
 get_output_file() {
   local input_file="$1"
-  local filename base input_ext output_ext output_dir
+  local filename base input_ext output_ext output_dir relative_input relative_dir
 
   filename="$(basename "$input_file")"
   output_dir="cmp"
   if [ "$DELETE_ORIGINAL" -eq 1 ]; then
     output_dir="$(dirname "$input_file")"
+  elif [ "$RECURSIVE" -eq 1 ]; then
+    relative_input="${input_file#./}"
+    relative_dir="$(dirname "$relative_input")"
+    if [ "$relative_dir" != "." ]; then
+      output_dir="cmp/${relative_dir}"
+    fi
   fi
 
   base="${filename%.*}"
@@ -950,9 +996,9 @@ get_output_file() {
 }
 
 resume_settings_signature() {
-  printf 'HEIGHT=%s;SMPTE=%s;OQ=%s;NPA=%s;CONTAINER=%s;DELETE=%s\n' \
+  printf 'HEIGHT=%s;SMPTE=%s;OQ=%s;NPA=%s;CONTAINER=%s;DELETE=%s;VERIFY=%s\n' \
     "$HEIGHT" "$ENABLE_SMPTE" "$ORIGINAL_QUALITY" "$NO_PROXY_APPEND" \
-    "$PRESERVE_CONTAINER" "$DELETE_ORIGINAL"
+    "$PRESERVE_CONTAINER" "$DELETE_ORIGINAL" "$VERIFY_MODE"
 }
 
 get_file_identity() {
@@ -967,6 +1013,80 @@ get_file_identity() {
 
   stat -c '%d:%i:%s:%Y' "$input_file" 2>/dev/null || true
 }
+
+get_identity_inode() {
+  local identity="$1"
+  awk -F: '{ print $1 ":" $2 }' <<< "$identity"
+}
+
+is_processed_file() {
+  local input_file="$1"
+  local identity recorded_identity
+
+  if [ "$REENCODE_PROCESSED" -eq 1 ] || [ ! -f "$PROCESSED_FILE" ]; then
+    return 1
+  fi
+
+  identity="$(get_file_identity "$input_file")"
+  if [ -z "$identity" ]; then
+    return 1
+  fi
+
+  while IFS= read -r recorded_identity; do
+    if [ "$recorded_identity" = "$identity" ]; then
+      return 0
+    fi
+  done < "$PROCESSED_FILE"
+
+  return 1
+}
+
+mark_processed_file() {
+  local output_file="$1"
+  local identity
+
+  identity="$(get_file_identity "$output_file")"
+  if [ -z "$identity" ]; then
+    return
+  fi
+
+  if [ -f "$PROCESSED_FILE" ] && awk -v wanted="$identity" '$0 == wanted { found=1 } END { exit !found }' "$PROCESSED_FILE"; then
+    return
+  fi
+
+  printf '%s\n' "$identity" >> "$PROCESSED_FILE"
+}
+
+print_interrupt_summary() {
+  local exit_code="$1"
+  local elapsed=0
+
+  if [ "$JOB_STARTED" -gt 0 ]; then
+    elapsed=$(( $(date +%s) - JOB_STARTED ))
+  fi
+
+  if [ -n "$CURRENT_TEMP_FILE" ] && [ -f "$CURRENT_TEMP_FILE" ]; then
+    rm -f -- "$CURRENT_TEMP_FILE"
+  fi
+
+  echo
+  echo "Job interrupted safely."
+  echo "Completed: $COMPLETED_COUNT"
+  if [ -f "$RESUME_FILE" ]; then
+    echo "Remaining queue preserved: $RESUME_FILE"
+  else
+    echo "Current original kept; existing completed outputs will be skipped."
+  fi
+  echo "Elapsed: $(format_duration "$elapsed")"
+  echo "Re-run the same command and settings to resume."
+  exit "$exit_code"
+}
+
+handle_interrupt() {
+  print_interrupt_summary 130
+}
+
+trap handle_interrupt INT TERM
 
 write_resume_manifest() {
   local temp_file="$1"
@@ -1018,8 +1138,9 @@ load_resume_queue() {
       current_identity="$(get_file_identity "$record")"
       if [ "$NO_PROXY_APPEND" -eq 1 ] && \
          [ -n "$pending_identity" ] && \
-         [ "$current_identity" != "$pending_identity" ]; then
+         [ "$(get_identity_inode "$current_identity")" != "$(get_identity_inode "$pending_identity")" ]; then
         echo "Recovered completed same-name output: $record"
+        mark_processed_file "$record"
       else
         RESUME_IDENTITIES+=( "$pending_identity" )
         RESUME_PATHS+=( "$record" )
@@ -1035,7 +1156,7 @@ load_resume_queue() {
   INPUT_FILES=( ${RESUME_PATHS[@]+"${RESUME_PATHS[@]}"} )
   RESUME_LOADED=1
 
-  if [ "${#INPUT_FILES[@]}" -eq 0 ]; then
+  if [ "${INPUT_FILES[0]+set}" != "set" ]; then
     rm -f -- "$RESUME_FILE"
   else
     save_resume_queue
@@ -1062,7 +1183,7 @@ remove_from_resume_queue() {
   RESUME_PATHS=( ${remaining_paths[@]+"${remaining_paths[@]}"} )
   RESUME_IDENTITIES=( ${remaining_identities[@]+"${remaining_identities[@]}"} )
 
-  if [ "${#RESUME_PATHS[@]}" -eq 0 ]; then
+  if [ "${RESUME_PATHS[0]+set}" != "set" ]; then
     rm -f -- "$RESUME_FILE"
   else
     save_resume_queue
@@ -1099,6 +1220,71 @@ pick_audio_stream() {
   fi
 
   echo "$chosen" | awk -F',' '{print $1, $2}'
+}
+
+has_audio_stream() {
+  local input="$1"
+  [ -n "$(ffprobe -v error -select_streams a:0 -show_entries stream=index -of csv=p=0 "$input" 2>/dev/null | head -n 1)" ]
+}
+
+verify_encoded_output() {
+  local source_file="$1"
+  local output_file="$2"
+  local source_duration output_duration video_stream
+  local source_has_audio=0
+  local output_has_audio=0
+  local verify_log
+
+  if [ "$VERIFY_MODE" = "none" ]; then
+    return 0
+  fi
+
+  video_stream="$(ffprobe -v error -select_streams v:0 -show_entries stream=index -of csv=p=0 "$output_file" 2>/dev/null | head -n 1 || true)"
+  if [ -z "$video_stream" ]; then
+    echo "Verification failed: output has no readable video stream." >&2
+    return 1
+  fi
+
+  source_duration="$(get_duration_seconds "$source_file")"
+  output_duration="$(get_duration_seconds "$output_file")"
+  if ! awk -v source="$source_duration" -v output="$output_duration" '
+    BEGIN {
+      if ((source + 0) <= 0 || (output + 0) <= 0) exit 1
+      difference = source - output
+      if (difference < 0) difference = -difference
+      tolerance = source * 0.02
+      if (tolerance < 2) tolerance = 2
+      exit !(difference <= tolerance)
+    }
+  '; then
+    echo "Verification failed: output duration does not match the source." >&2
+    echo "  source: $(format_duration "$source_duration") | output: $(format_duration "$output_duration")" >&2
+    return 1
+  fi
+
+  if has_audio_stream "$source_file"; then
+    source_has_audio=1
+  fi
+  if has_audio_stream "$output_file"; then
+    output_has_audio=1
+  fi
+  if [ "$source_has_audio" -eq 1 ] && [ "$output_has_audio" -eq 0 ]; then
+    echo "Verification failed: source audio is missing from the output." >&2
+    return 1
+  fi
+
+  if [ "$VERIFY_MODE" = "deep" ]; then
+    verify_log="$(mktemp "${TMPDIR:-/tmp}/cmp_video_v2_verify.XXXXXX")"
+    if ! ffmpeg -hide_banner -loglevel error -xerror -i "$output_file" -map 0:v:0 -map "0:a?" -f null - 2>"$verify_log"; then
+      echo "Deep verification failed while decoding the output:" >&2
+      sed 's/^/  /' "$verify_log" >&2
+      rm -f -- "$verify_log"
+      return 1
+    fi
+    rm -f -- "$verify_log"
+  fi
+
+  return 0
 }
 
 estimate_output_size_bytes() {
@@ -1164,10 +1350,11 @@ estimate_output_size_bytes() {
 
 collect_input_files() {
   local input_file
+  local collected_files=()
 
   INPUT_FILES=()
 
-  if [ "$RECURSIVE" -eq 1 ] && [ "$DELETE_ORIGINAL" -eq 1 ] && [ -f "$RESUME_FILE" ]; then
+  if [ "$INPUT" = "--all" ] && [ "$DELETE_ORIGINAL" -eq 1 ] && [ -f "$RESUME_FILE" ]; then
     echo "Resuming interrupted delete-original job from $RESUME_FILE"
     load_resume_queue
     return
@@ -1190,6 +1377,28 @@ collect_input_files() {
   elif [ -n "$INPUT" ]; then
     INPUT_FILES=( "$INPUT" )
   fi
+
+  if [ "$INPUT" = "--all" ] && [ "$REENCODE_PROCESSED" -eq 0 ]; then
+    for input_file in ${INPUT_FILES[@]+"${INPUT_FILES[@]}"}; do
+      if is_processed_file "$input_file"; then
+        PROCESSED_SKIP_COUNT=$((PROCESSED_SKIP_COUNT + 1))
+      else
+        collected_files+=( "$input_file" )
+      fi
+    done
+    INPUT_FILES=( ${collected_files[@]+"${collected_files[@]}"} )
+    if [ "$PROCESSED_SKIP_COUNT" -gt 0 ]; then
+      echo "Skipping $PROCESSED_SKIP_COUNT previously processed file(s)."
+    fi
+  fi
+}
+
+refresh_input_file_count() {
+  local input_file
+  INPUT_FILE_COUNT=0
+  for input_file in ${INPUT_FILES[@]+"${INPUT_FILES[@]}"}; do
+    INPUT_FILE_COUNT=$((INPUT_FILE_COUNT + 1))
+  done
 }
 
 validate_input_files() {
@@ -1225,13 +1434,14 @@ print_preflight_summary() {
   echo "Mode: $(describe_mode)"
   echo "Video: $(describe_video_settings)"
   echo "Audio: AAC 128k stereo"
+  echo "Verification: $VERIFY_MODE"
   echo "SMPTE overlay: $(yes_no "$ENABLE_SMPTE")"
   echo "Preserve container: $(yes_no "$PRESERVE_CONTAINER")"
   echo "Delete originals: $(yes_no "$DELETE_ORIGINAL")"
   echo "Output container: $(describe_output_container)"
   echo "Output naming: $(describe_output_naming)"
   echo "Recursive search: $(yes_no "$RECURSIVE")"
-  echo "Matched files: ${#INPUT_FILES[@]}"
+  echo "Matched files: $INPUT_FILE_COUNT"
   echo
 
   for input_file in "${INPUT_FILES[@]}"; do
@@ -1302,7 +1512,11 @@ print_preflight_summary() {
   fi
 
   if [ "$DELETE_ORIGINAL" -eq 1 ]; then
-    echo "Delete note: originals are removed only after a successful encode creates a non-empty output file."
+    if [ "$VERIFY_MODE" = "none" ]; then
+      echo "Delete warning: verification is disabled; originals are removed after FFmpeg reports success."
+    else
+      echo "Delete note: originals are removed only after successful output verification."
+    fi
   fi
 
   echo
@@ -1358,18 +1572,32 @@ compress_file() {
   local job_duration="$6"
   local job_started="$7"
 
+  local output_file encode_output replace_in_place=0
+  local output_filename output_base output_ext
+  local a_stream ch
+  local vf_filter="" fps drawtext_filter
+  local error_log file_started
+  local pipeline_status=()
+  local audio_args=()
+  local video_args=()
+  local filter_args=()
+
   if [ ! -f "$input_file" ]; then
     echo "File not found: $input_file"
     return 1
   fi
 
-  local output_file encode_output replace_in_place=0
   output_file="$(get_output_file "$input_file")"
-  encode_output="$output_file"
+  mkdir -p "$(dirname "$output_file")"
 
   if [ "$RESUME_LOADED" -eq 1 ] && [ -s "$output_file" ] && ! paths_are_same_file "$input_file" "$output_file"; then
     printf "[%d/%d] %s\n" "$file_index" "$file_total" "$(basename "$input_file")"
+    if ! verify_encoded_output "$input_file" "$output_file"; then
+      echo "  Existing output did not verify; original kept: $input_file" >&2
+      return 1
+    fi
     rm -- "$input_file"
+    mark_processed_file "$output_file"
     echo "  Encode was already complete; deleted original and finalized: $output_file"
     return 0
   fi
@@ -1378,18 +1606,14 @@ compress_file() {
     replace_in_place=1
   fi
 
-  if [ "$DELETE_ORIGINAL" -eq 1 ] || [ "$replace_in_place" -eq 1 ]; then
-    local output_filename output_base output_ext
-    output_filename="$(basename "$output_file")"
-    output_base="${output_filename%.*}"
-    output_ext=".${output_filename##*.}"
-    encode_output="$(dirname "$output_file")/.${output_base}.cmp_video_tmp.$$${output_ext}"
-  fi
+  output_filename="$(basename "$output_file")"
+  output_base="${output_filename%.*}"
+  output_ext=".${output_filename##*.}"
+  encode_output="$(dirname "$output_file")/.${output_base}.cmp_video_tmp.$$${output_ext}"
+  CURRENT_TEMP_FILE="$encode_output"
 
-  local a_stream ch
   read -r a_stream ch < <(pick_audio_stream "$input_file")
 
-  local vf_filter
   if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
     vf_filter=""
   else
@@ -1397,7 +1621,6 @@ compress_file() {
   fi
 
   if [ "$ENABLE_SMPTE" -eq 1 ]; then
-    local fps drawtext_filter
     fps="$(get_video_fps "$input_file")"
     drawtext_filter="drawtext=timecode='00\\:00\\:00\\:00':timecode_rate=${fps}:fontsize=h/30:fontcolor=white@0.55:box=1:boxcolor=black@0.22:boxborderw=2:shadowx=1:shadowy=1:shadowcolor=black@0.7:x=w-tw-w*0.02:y=h-th-h*0.03"
     if [ -n "$vf_filter" ]; then
@@ -1408,18 +1631,11 @@ compress_file() {
     echo "  SMPTE overlay enabled (timecode_rate=${fps})"
   fi
 
-  if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
-    echo "Creating original-quality encode (audio stream 0:${a_stream}): $input_file → $output_file"
-  else
-    echo "Creating ${HEIGHT}p proxy (${ch}ch, audio stream 0:${a_stream}): $input_file → $output_file"
+  if [ -n "$vf_filter" ]; then
+    filter_args=( -vf "$vf_filter" )
   fi
 
-  local audio_args=()
-  local video_args=()
-  local filter_args=()
-
   if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
-    # Keep video quality high and re-encode audio at high quality for compatibility.
     audio_args=( -c:a aac -b:a 192k )
     video_args=( -c:v libx264 -crf 14 -preset slow -fps_mode passthrough )
   else
@@ -1435,12 +1651,12 @@ compress_file() {
     video_args=( -c:v libx264 -crf 20 -preset medium -pix_fmt yuv420p -fps_mode passthrough )
   fi
 
-  if [ -n "$vf_filter" ]; then
-    filter_args=( -vf "$vf_filter" )
+  if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
+    echo "Creating original-quality encode (audio stream 0:${a_stream}): $input_file → $output_file"
+  else
+    echo "Creating ${HEIGHT}p proxy (${ch}ch, audio stream 0:${a_stream}): $input_file → $output_file"
   fi
 
-  local error_log file_started
-  local pipeline_status=()
   error_log="$(mktemp "${TMPDIR:-/tmp}/cmp_video_v2_ffmpeg.XXXXXX")"
   file_started="$(date +%s)"
 
@@ -1467,20 +1683,28 @@ compress_file() {
     fi
     rm -f -- "$error_log"
     rm -f -- "$encode_output"
+    CURRENT_TEMP_FILE=""
     return 1
   fi
   rm -f -- "$error_log"
 
+  if [ ! -s "$encode_output" ]; then
+    echo "Output file missing or empty after encode; original kept: $input_file" >&2
+    CURRENT_TEMP_FILE=""
+    return 1
+  fi
+
+  if ! verify_encoded_output "$input_file" "$encode_output"; then
+    echo "Verification failed; original kept: $input_file" >&2
+    rm -f -- "$encode_output"
+    CURRENT_TEMP_FILE=""
+    return 1
+  fi
+
+  mv -f -- "$encode_output" "$output_file"
+  CURRENT_TEMP_FILE=""
+
   if [ "$DELETE_ORIGINAL" -eq 1 ]; then
-    if [ ! -s "$encode_output" ]; then
-      echo "Output file missing or empty after encode; original kept: $input_file"
-      return 1
-    fi
-
-    if [ "$encode_output" != "$output_file" ]; then
-      mv -f -- "$encode_output" "$output_file"
-    fi
-
     if [ "$replace_in_place" -eq 1 ]; then
       echo "Replaced original with encoded output: $output_file"
     else
@@ -1488,6 +1712,9 @@ compress_file() {
       echo "Deleted original: $input_file"
     fi
   fi
+
+  mark_processed_file "$output_file"
+  return 0
 }
 
 if [ "$SHOW_HELP" -eq 1 ] || [ "${#ORIGINAL_ARGS[@]}" -eq 0 ]; then
@@ -1534,8 +1761,9 @@ if [ "$INPUT" != "--all" ] && [ -z "$INPUT" ]; then
 fi
 
 collect_input_files
+refresh_input_file_count
 
-if [ "${#INPUT_FILES[@]}" -eq 0 ]; then
+if [ "$INPUT_FILE_COUNT" -eq 0 ]; then
   echo "No matching video files found."
   exit 0
 fi
@@ -1545,6 +1773,7 @@ confirm_preflight
 
 PROCESS_FILES=()
 PROCESS_DURATIONS=()
+PROCESS_TOTAL=0
 JOB_TOTAL_DURATION=0
 
 for file in "${INPUT_FILES[@]}"; do
@@ -1562,6 +1791,7 @@ for file in "${INPUT_FILES[@]}"; do
 
   PROCESS_FILES+=( "$file" )
   PROCESS_DURATIONS+=( "$duration" )
+  PROCESS_TOTAL=$((PROCESS_TOTAL + 1))
   JOB_TOTAL_DURATION="$(awk -v total="$JOB_TOTAL_DURATION" -v duration="$duration" '
     BEGIN { printf "%.6f", total + duration }
   ')"
@@ -1569,9 +1799,7 @@ done
 
 JOB_STARTED="$(date +%s)"
 COMPLETED_DURATION=0
-PROCESS_TOTAL="${#PROCESS_FILES[@]}"
-
-if [ "$RECURSIVE" -eq 1 ] && [ "$DELETE_ORIGINAL" -eq 1 ] && [ "$RESUME_LOADED" -eq 0 ]; then
+if [ "$INPUT" = "--all" ] && [ "$DELETE_ORIGINAL" -eq 1 ] && [ "$RESUME_LOADED" -eq 0 ]; then
   RESUME_PATHS=( "${PROCESS_FILES[@]}" )
   RESUME_IDENTITIES=()
   for file in "${RESUME_PATHS[@]}"; do
@@ -1581,18 +1809,42 @@ if [ "$RECURSIVE" -eq 1 ] && [ "$DELETE_ORIGINAL" -eq 1 ] && [ "$RESUME_LOADED" 
 fi
 
 for ((i = 0; i < PROCESS_TOTAL; i++)); do
-  compress_file \
-    "${PROCESS_FILES[$i]}" "$((i + 1))" "$PROCESS_TOTAL" \
-    "${PROCESS_DURATIONS[$i]}" "$COMPLETED_DURATION" \
-    "$JOB_TOTAL_DURATION" "$JOB_STARTED"
-  if [ "$RECURSIVE" -eq 1 ] && [ "$DELETE_ORIGINAL" -eq 1 ]; then
-    remove_from_resume_queue "${PROCESS_FILES[$i]}"
+  if compress_file \
+      "${PROCESS_FILES[$i]}" "$((i + 1))" "$PROCESS_TOTAL" \
+      "${PROCESS_DURATIONS[$i]}" "$COMPLETED_DURATION" \
+      "$JOB_TOTAL_DURATION" "$JOB_STARTED"; then
+    COMPLETED_COUNT=$((COMPLETED_COUNT + 1))
+    if [ "$INPUT" = "--all" ] && [ "$DELETE_ORIGINAL" -eq 1 ]; then
+      remove_from_resume_queue "${PROCESS_FILES[$i]}"
+    fi
+  else
+    FAILED_COUNT=$((FAILED_COUNT + 1))
+    echo "Continuing with the remaining queue."
   fi
   COMPLETED_DURATION="$(awk \
     -v completed="$COMPLETED_DURATION" \
     -v duration="${PROCESS_DURATIONS[$i]}" '
     BEGIN { printf "%.6f", completed + duration }
   ')"
+  if [ "$STOP_AFTER_CURRENT" -eq 1 ] && [ "$((i + 1))" -lt "$PROCESS_TOTAL" ]; then
+    STOPPED_EARLY=1
+    break
+  fi
 done
 
-echo "Completed ${PROCESS_TOTAL} file(s) in $(format_duration "$(( $(date +%s) - JOB_STARTED ))")."
+echo
+echo "Job summary"
+echo "-----------"
+echo "Completed: $COMPLETED_COUNT"
+echo "Failed: $FAILED_COUNT"
+echo "Elapsed: $(format_duration "$(( $(date +%s) - JOB_STARTED ))")"
+if [ "$STOPPED_EARLY" -eq 1 ]; then
+  echo "Stopped cleanly after the current file."
+  echo "Re-run without --stop-after-current to finish the remaining files."
+fi
+if [ "$FAILED_COUNT" -gt 0 ]; then
+  if [ -f "$RESUME_FILE" ]; then
+    echo "Remaining queue: $RESUME_FILE"
+  fi
+  exit 1
+fi
