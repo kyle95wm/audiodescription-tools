@@ -7,7 +7,7 @@ fi
 set -euo pipefail
 mkdir -p "cmp"
 
-SCRIPT_VERSION="1.2.3"
+SCRIPT_VERSION="1.3.0"
 # Set this to your raw GitHub script URL if you want a fixed update source.
 # Example: https://raw.githubusercontent.com/owner/repo/main/cmp_video_v2.sh
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/refs/heads/main/audio_video_tools/cmp_video_v2.sh"
@@ -29,6 +29,7 @@ SELF_UPDATE_ONLY=0
 SKIP_UPDATE=0
 SHOW_HELP=0
 INTERACTIVE_MODE=0
+RECURSIVE=0
 PREFLIGHT_PROCESS_COUNT=0
 PREFLIGHT_SKIP_COUNT=0
 INPUT_FILES=()
@@ -168,6 +169,10 @@ for arg in "$@"; do
       ;;
     --all)
       INPUT="--all"
+      ;;
+    --recursive|-r)
+      INPUT="--all"
+      RECURSIVE=1
       ;;
     *)
       INPUT="$arg"
@@ -309,10 +314,11 @@ cmp_video_v2.sh - Proxy/original-quality video encoder with optional SMPTE overl
 Usage:
   $0 <file>
   $0 --all
+  $0 --recursive
   $0 --interactive [file]
   $0 --interactive [file]         # optionally save/update personal defaults
-  $0 [--fhd] [--smpte] [--no-proxy-append] [--preserve-container] [--yes] [--delete-original] <file|--all>
-  $0 --original-quality [--smpte] [--preserve-container] [--yes] [--delete-original] <file|--all>
+  $0 [--fhd] [--smpte] [--no-proxy-append] [--preserve-container] [--yes] [--delete-original] <file|--all|--recursive>
+  $0 --original-quality [--smpte] [--preserve-container] [--yes] [--delete-original] <file|--all|--recursive>
   $0 --self-update
 
 Examples:
@@ -320,12 +326,15 @@ Examples:
   $0 --interactive
   $0 --fhd clip.mov
   $0 --smpte --all
+  $0 --recursive
   $0 --original-quality --smpte interview.mkv
   $0 --delete-original --yes --all
   $0 --self-update
 
 Options:
   --all                  Process all .mkv .mp4 .mov .m4v files in current directory
+  --recursive, -r        Process supported files below the current directory
+                         and write all outputs to the root ./cmp directory
   --interactive          Prompt for input and compatible settings in a guided menu
   --fhd                  Target 1080p proxy mode (default proxy mode is 720p)
   --original-quality     Re-encode at source resolution with high quality settings
@@ -342,6 +351,7 @@ Options:
 
 Output:
   Files are written to ./cmp
+  Recursive searches ignore all directories named cmp
   Existing output files are skipped
 
 Saved Settings:
@@ -543,11 +553,20 @@ run_interactive_setup() {
     selection=1
   fi
 
-  selection="$(prompt_menu_choice "Choose input source:" "$selection" "Single file" "All supported files in current directory")"
+  if [ "$RECURSIVE" -eq 1 ]; then
+    selection=3
+  fi
+
+  selection="$(prompt_menu_choice "Choose input source:" "$selection" "Single file" "All supported files in current directory" "All supported files recursively")"
   if [ "$selection" -eq 1 ]; then
     INPUT="$(prompt_input_file "$INPUT")"
+    RECURSIVE=0
+  elif [ "$selection" -eq 2 ]; then
+    INPUT="--all"
+    RECURSIVE=0
   else
     INPUT="--all"
+    RECURSIVE=1
   fi
   echo
 
@@ -845,9 +864,20 @@ estimate_output_size_bytes() {
 }
 
 collect_input_files() {
+  local input_file
+
   INPUT_FILES=()
 
-  if [ "$INPUT" = "--all" ]; then
+  if [ "$INPUT" = "--all" ] && [ "$RECURSIVE" -eq 1 ]; then
+    while IFS= read -r -d '' input_file; do
+      INPUT_FILES+=( "$input_file" )
+    done < <(
+      find . \
+        -type d -name cmp -prune -o \
+        -type f \( -iname '*.mkv' -o -iname '*.mp4' -o -iname '*.mov' -o -iname '*.m4v' \) \
+        -print0
+    )
+  elif [ "$INPUT" = "--all" ]; then
     shopt -s nullglob
     INPUT_FILES=( *.mkv *.mp4 *.mov *.m4v )
     shopt -u nullglob
@@ -894,6 +924,7 @@ print_preflight_summary() {
   echo "Delete originals: $(yes_no "$DELETE_ORIGINAL")"
   echo "Output container: $(describe_output_container)"
   echo "Output naming: $(describe_output_naming)"
+  echo "Recursive search: $(yes_no "$RECURSIVE")"
   echo "Matched files: ${#INPUT_FILES[@]}"
   echo
 
@@ -1146,4 +1177,3 @@ confirm_preflight
 for file in "${INPUT_FILES[@]}"; do
   compress_file "$file"
 done
-
