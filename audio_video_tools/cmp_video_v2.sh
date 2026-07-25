@@ -5,9 +5,8 @@ if [ -z "${BASH_VERSION:-}" ]; then
 fi
 
 set -euo pipefail
-mkdir -p "cmp"
 
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.4.0"
 # Set this to your raw GitHub script URL if you want a fixed update source.
 # Example: https://raw.githubusercontent.com/owner/repo/main/cmp_video_v2.sh
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/kyle95wm/audiodescription-tools/refs/heads/main/audio_video_tools/cmp_video_v2.sh"
@@ -152,7 +151,7 @@ for arg in "$@"; do
     --yes|--force)
       AUTO_CONFIRM=1
       ;;
-    --delete-original)
+    --delete-original|--delete-originals)
       DELETE_ORIGINAL=1
       ;;
     --interactive)
@@ -342,7 +341,9 @@ Options:
   --no-proxy-append      Output name: cmp/<base>.<ext> instead of proxy suffix
   --npa                  Alias for --no-proxy-append
   --preserve-container   Keep source container extension instead of forcing .mp4
-  --delete-original      Delete source only after successful, non-empty output
+  --delete-original, --delete-originals
+                         Delete source only after successful, non-empty output;
+                         output is written beside the source instead of in ./cmp
   --yes, --force         Skip confirmation prompt after preflight overview
   --self-update, --update Check GitHub and install latest script version, then exit
   --no-update, --skip-update
@@ -350,7 +351,8 @@ Options:
   -h, --help             Show this help menu
 
 Output:
-  Files are written to ./cmp
+  Files are normally written to ./cmp
+  With --delete-original(s), each output is written beside its source
   Recursive searches ignore all directories named cmp
   Existing output files are skipped
 
@@ -747,9 +749,14 @@ describe_output_naming() {
 
 get_output_file() {
   local input_file="$1"
-  local filename base input_ext output_ext
+  local filename base input_ext output_ext output_dir
 
   filename="$(basename "$input_file")"
+  output_dir="cmp"
+  if [ "$DELETE_ORIGINAL" -eq 1 ]; then
+    output_dir="$(dirname "$input_file")"
+  fi
+
   base="${filename%.*}"
   if [ "$base" = "$filename" ]; then
     input_ext=""
@@ -764,17 +771,24 @@ get_output_file() {
 
   if [ "$ORIGINAL_QUALITY" -eq 1 ]; then
     if [ "$ENABLE_SMPTE" -eq 1 ]; then
-      echo "cmp/${base}_smpte_oq${output_ext}"
+      echo "${output_dir}/${base}_smpte_oq${output_ext}"
     else
-      echo "cmp/${base}_oq${output_ext}"
+      echo "${output_dir}/${base}_oq${output_ext}"
     fi
   elif [ "$NO_PROXY_APPEND" -eq 1 ]; then
-    echo "cmp/${base}${output_ext}"
+    echo "${output_dir}/${base}${output_ext}"
   elif [ "$HEIGHT" -eq 1080 ]; then
-    echo "cmp/${base}_proxy_fhd${output_ext}"
+    echo "${output_dir}/${base}_proxy_fhd${output_ext}"
   else
-    echo "cmp/${base}_proxy${output_ext}"
+    echo "${output_dir}/${base}_proxy${output_ext}"
   fi
+}
+
+paths_are_same_file() {
+  local first_path="$1"
+  local second_path="$2"
+
+  [ -e "$first_path" ] && [ -e "$second_path" ] && [ "$first_path" -ef "$second_path" ]
 }
 
 pick_audio_stream() {
@@ -935,7 +949,7 @@ print_preflight_summary() {
     estimate_bytes="$(estimate_output_size_bytes "$input_file")"
     status="CREATE"
 
-    if [ -f "$output_file" ]; then
+    if [ -f "$output_file" ] && ! paths_are_same_file "$input_file" "$output_file"; then
       status="SKIP"
       PREFLIGHT_SKIP_COUNT=$((PREFLIGHT_SKIP_COUNT + 1))
       output_bytes="$(get_file_size_bytes "$output_file")"
@@ -1044,12 +1058,21 @@ compress_file() {
     return 1
   fi
 
-  local output_file
+  local output_file encode_output
   output_file="$(get_output_file "$input_file")"
+  encode_output="$output_file"
 
-  if [ -f "$output_file" ]; then
+  if [ -f "$output_file" ] && ! paths_are_same_file "$input_file" "$output_file"; then
     echo "Skipping $input_file (proxy exists)"
     return 0
+  fi
+
+  if paths_are_same_file "$input_file" "$output_file"; then
+    local output_filename output_base output_ext
+    output_filename="$(basename "$output_file")"
+    output_base="${output_filename%.*}"
+    output_ext=".${output_filename##*.}"
+    encode_output="$(dirname "$output_file")/.${output_base}.cmp_video_tmp.$$${output_ext}"
   fi
 
   local a_stream ch
@@ -1105,22 +1128,30 @@ compress_file() {
     filter_args=( -vf "$vf_filter" )
   fi
 
-  ffmpeg -hide_banner -loglevel warning -stats \
-    -sn \
-    -i "$input_file" \
-    -map 0:v:0 -map "0:${a_stream}" \
-    "${filter_args[@]}" \
-    "${video_args[@]}" \
-    "${audio_args[@]}" \
-    "$output_file"
+  if ! ffmpeg -hide_banner -loglevel warning -stats \
+      -sn \
+      -i "$input_file" \
+      -map 0:v:0 -map "0:${a_stream}" \
+      "${filter_args[@]}" \
+      "${video_args[@]}" \
+      "${audio_args[@]}" \
+      "$encode_output"; then
+    rm -f -- "$encode_output"
+    return 1
+  fi
 
   if [ "$DELETE_ORIGINAL" -eq 1 ]; then
-    if [ -s "$output_file" ]; then
-      rm -- "$input_file"
-      echo "Deleted original: $input_file"
-    else
+    if [ ! -s "$encode_output" ]; then
       echo "Output file missing or empty after encode; original kept: $input_file"
       return 1
+    fi
+
+    if [ "$encode_output" != "$output_file" ]; then
+      mv -f -- "$encode_output" "$output_file"
+      echo "Replaced original with encoded output: $output_file"
+    else
+      rm -- "$input_file"
+      echo "Deleted original: $input_file"
     fi
   fi
 }
@@ -1156,6 +1187,10 @@ if [ "$INTERACTIVE_MODE" -eq 1 ]; then
 fi
 
 maybe_offer_save_settings
+
+if [ "$DELETE_ORIGINAL" -eq 0 ]; then
+  mkdir -p "cmp"
+fi
 
 if [ "$INPUT" != "--all" ] && [ -z "$INPUT" ]; then
   echo "Error: missing input file or --all."
